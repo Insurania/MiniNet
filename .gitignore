@@ -1,0 +1,24 @@
+# Build output
+bin/
+obj/
+out/
+artifacts/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Test output
+TestResults/
+coverage/
+*.trx
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+
