@@ -40,6 +40,7 @@ MiniNet/
       feature_request.md
     pull_request_template.md
   docs/
+    project-rules.md
     roadmap.md
   src/
     MiniNet/
@@ -56,9 +57,10 @@ MiniNet/
 5. 做 code review，重点看边界情况、职责划分、测试覆盖和后续可维护性。
 6. 根据 review 修改，再合并。
 
+详细项目规则见 [docs/project-rules.md](docs/project-rules.md)。
+
 ## 当前状态
 
 - 已建立项目目录结构。
 - 已添加 README、路线图、issue 模板和 PR 模板。
 - 尚未添加源码、测试项目或网络协议实现。
-
