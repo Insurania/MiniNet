@@ -18,7 +18,8 @@ MiniNet 是一个学习项目，核心目的有两个：
 
 ## 技术规则
 
-- 默认语言：C++ / .NET。
+- 默认语言：C++。
+- 默认构建：CMake。
 - 默认平台：Windows。
 - 网络基础：UDP。
 - 测试优先级：单元测试优先，其次是本地手动 demo。
@@ -189,4 +190,3 @@ test: cover malformed packet handling
 - 下一个 issue 应该如何拆得更好。
 
 这部分可以写在 issue comment、PR comment，或后续单独整理到文档中。
-
