@@ -3,6 +3,11 @@ bin/
 obj/
 out/
 artifacts/
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
 
 # IDE
 .vs/
@@ -21,4 +26,3 @@ coverage/
 # OS
 Thumbs.db
 Desktop.ini
-
