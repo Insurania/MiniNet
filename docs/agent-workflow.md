@@ -1,0 +1,181 @@
+# AI Agent Workflow
+
+这份文档定义 MiniNet 处理 GitHub issue 时的标准 AI agent 协作流程。
+
+目标不是让 AI 一次性替你完成所有判断，而是让每个阶段都有明确输入、输出和人工确认点。
+
+## 标准流程
+
+对每个 GitHub issue，默认按以下顺序处理：
+
+1. `issue_reviewer`
+2. `architecture_planner`
+3. `implementation_worker`
+4. `test_worker`
+
+除非你明确要求跳过某一步，否则不要直接进入实现。
+
+## Step 1: issue_reviewer
+
+目的：检查 issue 是否已经适合实现。
+
+输入：
+
+- GitHub issue 编号或 issue 内容。
+- 当前项目规则。
+- 相关路线图阶段。
+
+检查重点：
+
+- 目标是否清楚。
+- 范围是否太大。
+- non-goals 是否明确。
+- 验收标准是否可观察、可验证。
+- 测试用例是否覆盖正常路径和关键边界情况。
+- 是否把 ACK、重传、连接、心跳等后续能力意外混进当前 issue。
+
+输出：
+
+- Issue 是否 Ready。
+- 主要问题。
+- 建议修改文字。
+- 缺失的验收标准。
+- 缺失的测试。
+- scope creep 风险。
+
+人工确认点：
+
+- 如果 issue 是 `Not Ready`，应先修改 issue。
+- 如果只是小问题，可以由你确认后继续进入架构设计。
+
+## Step 2: architecture_planner
+
+目的：把已确认的 issue 转成最小实现方案。
+
+输入：
+
+- 已通过 review 的 issue。
+- `issue_reviewer` 的结论。
+- 当前代码结构。
+
+检查重点：
+
+- 模块边界。
+- 数据流。
+- 文件布局。
+- public 类型和职责。
+- 最小实现顺序。
+- 风险和限制。
+- 测试如何映射验收标准。
+
+输出：
+
+- Proposed Architecture。
+- Data Flow。
+- Files to Create or Modify。
+- Key Types and Functions。
+- Implementation Order。
+- Test Mapping。
+- Non-goals Preserved。
+
+人工确认点：
+
+- 如果方案引入了过多抽象，应缩小。
+- 如果方案遗漏验收标准，应补齐后再实现。
+
+## Step 3: implementation_worker
+
+目的：按 issue 和架构方案实现最小代码改动。
+
+输入：
+
+- 已确认的 issue。
+- `architecture_planner` 输出的实现方案。
+- 当前项目规则和注释规则。
+
+实现规则：
+
+- 不扩大范围。
+- 不实现 non-goals。
+- 不发送 raw struct memory。
+- 使用固定宽度整数。
+- 保持协议解析和 socket IO 尽量分离。
+- 保持改动小而可 review。
+- 头文件和实现文件按项目注释规则补充说明。
+
+输出：
+
+- Implementation Summary。
+- Files Changed。
+- Design Decisions。
+- Commands Run。
+- Known Limitations。
+- Follow-up Needed。
+
+人工确认点：
+
+- 实现后先看 diff 是否符合 issue 范围。
+- 不理解的代码要先要求解释，不急着进入测试。
+
+## Step 4: test_worker
+
+目的：补齐并运行测试，确认实现满足验收标准。
+
+输入：
+
+- issue 验收标准。
+- `architecture_planner` 的 Test Mapping。
+- `implementation_worker` 的代码改动。
+
+测试重点：
+
+- packet encode/decode。
+- packet validation。
+- 正常路径。
+- 非法输入。
+- 超时或失败路径。
+- 和当前 issue 相关的回归测试。
+
+输出：
+
+- Test Plan。
+- Tests Added。
+- Acceptance Criteria Mapping。
+- Commands Run。
+- Results。
+- Bugs Found。
+- Suggested Fixes。
+
+人工确认点：
+
+- 如果测试失败，回到 implementation_worker 修复。
+- 如果测试覆盖不足，先补测试，再写 PR。
+
+## GitHub Issue 工作方式
+
+当你在 GitHub 上写好 issue 后，可以这样告诉 Codex：
+
+```text
+按标准 agent workflow 处理 issue #2
+```
+
+Codex 应该按顺序执行：
+
+```text
+issue_reviewer -> architecture_planner -> implementation_worker -> test_worker
+```
+
+如果 GitHub CLI 或网络不可用，Codex 应要求你粘贴 issue 内容，不要反复要求登录或重装。
+
+## PR 前检查
+
+进入 PR 前应确认：
+
+- issue 已经过 review。
+- 实现方案没有扩大范围。
+- 代码已按注释规则补充必要说明。
+- 构建通过。
+- 测试通过。
+- PR 描述包含测试结果和未实现内容。
+- 如果该 PR 完成 issue，应在 PR 描述里写 `Closes #issue_number`。
+

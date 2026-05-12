@@ -156,6 +156,7 @@ Review 重点看：
 使用 AI agent 时，尽量遵循：
 
 - 先给 issue，再让 AI 实现。
+- 对 GitHub issue 默认使用标准 agent workflow：`issue_reviewer -> architecture_planner -> implementation_worker -> test_worker`。
 - 让 AI 说明计划，但不要一次性实现太大范围。
 - 要求 AI 保持改动小而可 review。
 - 要求 AI 运行测试或说明为什么不能运行。
@@ -178,6 +179,8 @@ AI 不应该替代：
 - 你对需求边界的确认。
 - 你对最终代码的理解。
 - 你对是否合并 PR 的决定。
+
+详细流程见 [agent-workflow.md](agent-workflow.md)。
 
 ## 提交规则
 
