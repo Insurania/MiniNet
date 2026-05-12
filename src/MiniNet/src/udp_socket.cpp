@@ -22,6 +22,8 @@ class WsaSession {
 public:
     WsaSession()
     {
+        // Windows 的 socket API 需要显式初始化 winsock。
+        // 如果这一步失败，后续 socket/bind/sendto 都没有意义，所以直接抛异常。
         WSADATA data{};
         const auto result = WSAStartup(MAKEWORD(2, 2), &data);
         if (result != 0) {
@@ -31,6 +33,7 @@ public:
 
     ~WsaSession()
     {
+        // 和 WSAStartup 配对。当前用静态对象管理生命周期，进程退出时自动清理。
         WSACleanup();
     }
 };
@@ -45,11 +48,13 @@ WsaSession& wsa_session()
 
 std::runtime_error socket_error(const char* action)
 {
+    // Windows 通过 WSAGetLastError 获取最近一次 socket 错误码。
     return std::runtime_error(std::string(action) + " failed with WSA error " + std::to_string(WSAGetLastError()));
 }
 #else
 std::runtime_error socket_error(const char* action)
 {
+    // POSIX 系统通过 errno 获取最近一次 socket 错误。
     return std::runtime_error(std::string(action) + " failed: " + std::strerror(errno));
 }
 #endif
@@ -71,6 +76,8 @@ sockaddr_in to_sockaddr(const UdpEndpoint& endpoint)
 
 UdpEndpoint from_sockaddr(const sockaddr_in& address)
 {
+    // 把系统 socket API 返回的 sockaddr_in 转回 MiniNet 自己的 UdpEndpoint。
+    // 这样协议层不用直接依赖 sockaddr_in。
     std::array<char, INET_ADDRSTRLEN> buffer{};
     auto ipv4_address = address.sin_addr;
     const char* converted = inet_ntop(AF_INET, &ipv4_address, buffer.data(), static_cast<socklen_t>(buffer.size()));
@@ -88,6 +95,7 @@ UdpSocket::UdpSocket() = default;
 UdpSocket::UdpSocket(NativeSocket socket)
     : socket_(socket)
 {
+    // 私有构造函数只接收已经创建成功的系统 socket。
 }
 
 UdpSocket::~UdpSocket()
@@ -105,11 +113,14 @@ UdpSocket::~UdpSocket()
 UdpSocket::UdpSocket(UdpSocket&& other) noexcept
     : socket_(other.socket_)
 {
+    // 移动构造转移 socket 所有权，并让源对象进入“无 socket”状态。
     other.socket_ = kInvalidSocket;
 }
 
 UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept
 {
+    // 移动赋值前先关闭自己已有的 socket，避免资源泄漏。
+    // 然后接管 other 的 socket，并清空 other。
     if (this == &other) {
         return *this;
     }
@@ -129,6 +140,8 @@ UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept
 
 UdpSocket UdpSocket::open()
 {
+    // 创建 IPv4 UDP socket。
+    // AF_INET 表示 IPv4，SOCK_DGRAM 表示 UDP datagram，IPPROTO_UDP 明确协议类型。
 #ifdef _WIN32
     (void)wsa_session();
 #endif
@@ -160,6 +173,8 @@ UdpSocket UdpSocket::bind(std::uint16_t port)
 
 std::uint16_t UdpSocket::local_port() const
 {
+    // getsockname 查询 socket 当前绑定的本地地址。
+    // 当 bind(0) 让系统自动分配端口时，测试需要通过这里拿到真实端口。
     sockaddr_in local{};
     socklen_t length = sizeof(local);
     if (::getsockname(socket_, reinterpret_cast<sockaddr*>(&local), &length) != 0) {
@@ -171,6 +186,8 @@ std::uint16_t UdpSocket::local_port() const
 
 void UdpSocket::send_to(ByteView bytes, const UdpEndpoint& endpoint) const
 {
+    // UDP sendto 每次发送一个完整 datagram。
+    // 这里要求 sent == bytes.size()，避免出现只发出一部分数据却被当成成功。
     const auto address = to_sockaddr(endpoint);
     const auto sent = ::sendto(socket_,
                                reinterpret_cast<const char*>(bytes.data()),
@@ -202,6 +219,7 @@ std::optional<UdpDatagram> UdpSocket::receive_from(std::chrono::milliseconds tim
     }
 
     if (ready == 0) {
+        // 超时不是错误，只表示这段时间没有收到任何 UDP 包。
         return std::nullopt;
     }
 

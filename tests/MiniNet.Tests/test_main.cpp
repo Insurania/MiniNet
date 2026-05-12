@@ -17,6 +17,7 @@ int failures = 0;
 
 void require(bool condition, const std::string& message)
 {
+    // 简单测试框架：失败时记录数量，不立刻退出，方便一次看到多个失败点。
     if (!condition) {
         ++failures;
         std::cerr << "FAILED: " << message << '\n';
@@ -113,6 +114,8 @@ void test_server_drops_invalid_packets()
 
 int main()
 {
+    // 当前不引入第三方测试框架，避免学习早期增加依赖和网络下载成本。
+    // 每个 test_* 函数覆盖 issue #1 的一个验收点。
     test_packet_header_round_trip();
     test_server_packet_validation();
     test_ping_pong_integration();

@@ -16,6 +16,8 @@ void write_u32_be(std::array<std::uint8_t, kPacketHeaderSize>& bytes, std::size_
 
 std::uint32_t read_u32_be(ByteView bytes, std::size_t offset)
 {
+    // write_u32_be 的反向操作：把连续 4 个网络序字节还原成 uint32。
+    // 这里不检查长度，因为调用方只会在确认 header 长度足够后调用。
     return (static_cast<std::uint32_t>(bytes[offset]) << 24) |
            (static_cast<std::uint32_t>(bytes[offset + 1]) << 16) |
            (static_cast<std::uint32_t>(bytes[offset + 2]) << 8) |
@@ -57,6 +59,7 @@ PacketValidationResult validate_packet(ByteView bytes, PacketType expected_type)
 
 bool is_known_packet_type(std::uint8_t raw_type)
 {
+    // 先检查原始字节是否属于已定义枚举，避免把未知值强转成 PacketType 后继续处理。
     return raw_type == static_cast<std::uint8_t>(PacketType::Ping) ||
            raw_type == static_cast<std::uint8_t>(PacketType::Pong);
 }
@@ -95,11 +98,13 @@ std::optional<PacketHeader> decode_packet_header(ByteView bytes)
 
 PacketValidationResult validate_ping_packet(ByteView bytes)
 {
+    // 服务端入口使用这个函数：只有当前协议版本的 Ping 才能触发 Pong 回复。
     return validate_packet(bytes, PacketType::Ping);
 }
 
 PacketValidationResult validate_pong_packet(ByteView bytes)
 {
+    // 客户端入口使用这个函数：只有当前协议版本的 Pong 才能算一次 Ping 成功。
     return validate_packet(bytes, PacketType::Pong);
 }
 

@@ -27,6 +27,7 @@ std::vector<std::uint8_t> make_packet(PacketType type, std::uint32_t sequence)
 PingServer::PingServer(std::uint16_t port)
     : socket_(UdpSocket::bind(port))
 {
+    // 构造时就完成 bind，保证 PingServer 对象创建成功后一定处于可收包状态。
 }
 
 std::uint16_t PingServer::port() const
@@ -75,10 +76,13 @@ ServerStepResult PingServer::handle_next(std::chrono::milliseconds timeout)
 PingClient::PingClient()
     : socket_(UdpSocket::open())
 {
+    // 客户端不绑定固定端口，让操作系统选择临时端口即可。
+    // 服务端回复时会使用收到的 sender endpoint，所以客户端仍然能收到 Pong。
 }
 
 std::uint32_t PingClient::next_sequence() const
 {
+    // 暴露 sequence 是为了测试和调试；业务代码通常不需要直接依赖它。
     return next_sequence_;
 }
 
@@ -112,11 +116,13 @@ PingResult PingClient::ping(const UdpEndpoint& server, std::chrono::milliseconds
 
 std::vector<std::uint8_t> make_ping_packet(std::uint32_t sequence)
 {
+    // 封装构造细节，让测试、client 和未来的重传逻辑都用同一套编码路径。
     return make_packet(PacketType::Ping, sequence);
 }
 
 std::vector<std::uint8_t> make_pong_packet(std::uint32_t sequence)
 {
+    // Pong 必须回带 Ping 的 sequence，否则客户端无法判断这是不是当前请求的回复。
     return make_packet(PacketType::Pong, sequence);
 }
 
