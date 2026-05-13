@@ -39,6 +39,7 @@
 - Issue 是否 Ready。
 - 主要问题。
 - 建议修改文字。
+- 完整的修订版 issue 草稿。
 - 缺失的验收标准。
 - 缺失的测试。
 - scope creep 风险。
@@ -46,7 +47,30 @@
 人工确认点：
 
 - 如果 issue 是 `Not Ready`，应先修改 issue。
+- `issue_reviewer` 必须给出一份完整的修订版 issue 正文，方便你直接查看和复制。
+- Codex 不能在没有确认的情况下直接修改 GitHub issue。
+- 如果你确认修订版 issue，可以让 Codex 使用 `gh issue edit <编号> --body-file <文件>` 直接更新 GitHub。
 - 如果只是小问题，可以由你确认后继续进入架构设计。
+
+推荐确认方式：
+
+```text
+这个修订版可以，帮我更新到 GitHub issue #N
+```
+
+如果 GitHub CLI、登录或网络失败，Codex 应输出修订版 issue 正文，让你手动复制到 GitHub，不要反复要求重装或重新登录。
+
+GitHub 更新方式：
+
+1. Codex 先把修订版 issue 正文展示给你。
+2. 你确认后，Codex 可以把正文写入临时文件，例如 `docs/tmp/issue-N-body.md`。
+3. Codex 执行：
+
+```powershell
+gh issue edit N --repo Insurania/MiniNet --body-file docs/tmp/issue-N-body.md
+```
+
+4. 更新成功后，Codex 应删除临时文件，或在你希望保留复盘记录时把它移动到正式文档目录。
 
 ## Step 2: architecture_planner
 
@@ -178,4 +202,3 @@ issue_reviewer -> architecture_planner -> implementation_worker -> test_worker
 - 测试通过。
 - PR 描述包含测试结果和未实现内容。
 - 如果该 PR 完成 issue，应在 PR 描述里写 `Closes #issue_number`。
-
