@@ -50,7 +50,11 @@ PacketValidationResult validate_any_packet(ByteView bytes)
 
 } // namespace
 
-std::vector<std::uint8_t> make_connection_packet(PacketType type, std::uint32_t sequence, std::uint32_t session_id)
+std::vector<std::uint8_t> make_connection_packet(PacketType type,
+                                                 std::uint32_t sequence,
+                                                 std::uint32_t session_id,
+                                                 std::uint32_t ack,
+                                                 std::uint32_t ack_bits)
 {
     // 连接控制包当前只有 header，没有 payload。
     // 这样握手、心跳、断开都复用同一条编码路径，减少协议格式分叉。
@@ -60,6 +64,8 @@ std::vector<std::uint8_t> make_connection_packet(PacketType type, std::uint32_t 
     header.type = type;
     header.sequence = sequence;
     header.session_id = session_id;
+    header.ack = ack;
+    header.ack_bits = ack_bits;
 
     const auto encoded = encode_packet_header(header);
     return {encoded.begin(), encoded.end()};
@@ -87,6 +93,11 @@ std::uint16_t ConnectionClient::local_port() const
     return socket_.local_port();
 }
 
+const std::vector<SentPacketRecord>& ConnectionClient::sent_packets() const
+{
+    return ack_tracker_.sent_packets();
+}
+
 ConnectionClientUpdateResult ConnectionClient::connect(std::chrono::steady_clock::time_point now)
 {
     // connect 只发起一次握手请求，不阻塞等待接受包。
@@ -96,7 +107,7 @@ ConnectionClientUpdateResult ConnectionClient::connect(std::chrono::steady_clock
         return result;
     }
 
-    const auto request = make_connection_packet(PacketType::ConnectRequest, next_sequence_++, 0);
+    const auto request = make_connection_packet(PacketType::ConnectRequest, 0, 0);
     socket_.send_to(request, server_);
 
     state_ = ConnectionState::Connecting;
@@ -138,6 +149,8 @@ ConnectionClientUpdateResult ConnectionClient::update(std::chrono::steady_clock:
                     }
                 } else if (state_ == ConnectionState::Connected && is_session_control_packet(header.type) &&
                            header.session_id == session_id_) {
+                    ack_tracker_.record_received(header.sequence);
+                    ack_tracker_.process_ack(header.ack, header.ack_bits);
                     last_recv_time_ = now;
 
                     if (header.type == PacketType::Disconnect) {
@@ -165,8 +178,11 @@ ConnectionClientUpdateResult ConnectionClient::update(std::chrono::steady_clock:
     }
 
     if (state_ == ConnectionState::Connected && now - last_send_time_ >= config_.heartbeat_interval) {
-        const auto heartbeat = make_connection_packet(PacketType::Heartbeat, next_sequence_++, session_id_);
+        const auto sequence = ack_tracker_.allocate_send_sequence();
+        const auto ack_state = ack_tracker_.make_ack_state();
+        const auto heartbeat = make_connection_packet(PacketType::Heartbeat, sequence, session_id_, ack_state.ack, ack_state.ack_bits);
         socket_.send_to(heartbeat, server_);
+        ack_tracker_.record_sent(sequence, now);
         last_send_time_ = now;
         result.sent = true;
     }
@@ -182,8 +198,11 @@ ConnectionClientUpdateResult ConnectionClient::disconnect(std::chrono::steady_cl
         return result;
     }
 
-    const auto packet = make_connection_packet(PacketType::Disconnect, next_sequence_++, session_id_);
+    const auto sequence = ack_tracker_.allocate_send_sequence();
+    const auto ack_state = ack_tracker_.make_ack_state();
+    const auto packet = make_connection_packet(PacketType::Disconnect, sequence, session_id_, ack_state.ack, ack_state.ack_bits);
     socket_.send_to(packet, server_);
+    ack_tracker_.record_sent(sequence, now);
 
     state_ = ConnectionState::Disconnected;
     session_id_ = 0;
@@ -267,14 +286,20 @@ ConnectionServerUpdateResult ConnectionServer::update(std::chrono::steady_clock:
             } else if (is_session_control_packet(header.type)) {
                 auto found = find_session_by_endpoint_and_id(sessions_, datagram->sender, header.session_id);
                 if (found != sessions_.end()) {
+                    found->ack_tracker.record_received(header.sequence);
+                    found->ack_tracker.process_ack(header.ack, header.ack_bits);
                     found->last_recv_time = now;
 
                     if (header.type == PacketType::Disconnect) {
                         sessions_.erase(found);
                         result.disconnected_session = true;
                     } else if (header.type == PacketType::Heartbeat) {
-                        const auto heartbeat = make_connection_packet(PacketType::Heartbeat, next_sequence_++, found->session_id);
+                        const auto sequence = found->ack_tracker.allocate_send_sequence();
+                        const auto ack_state = found->ack_tracker.make_ack_state();
+                        const auto heartbeat =
+                            make_connection_packet(PacketType::Heartbeat, sequence, found->session_id, ack_state.ack, ack_state.ack_bits);
                         socket_.send_to(heartbeat, datagram->sender);
+                        found->ack_tracker.record_sent(sequence, now);
                         found->last_send_time = now;
                         result.sent = true;
                     }
@@ -299,8 +324,12 @@ ConnectionServerUpdateResult ConnectionServer::update(std::chrono::steady_clock:
 
     for (auto& session : sessions_) {
         if (now - session.last_send_time >= config_.heartbeat_interval) {
-            const auto heartbeat = make_connection_packet(PacketType::Heartbeat, next_sequence_++, session.session_id);
+            const auto sequence = session.ack_tracker.allocate_send_sequence();
+            const auto ack_state = session.ack_tracker.make_ack_state();
+            const auto heartbeat =
+                make_connection_packet(PacketType::Heartbeat, sequence, session.session_id, ack_state.ack, ack_state.ack_bits);
             socket_.send_to(heartbeat, session.endpoint);
+            session.ack_tracker.record_sent(sequence, now);
             session.last_send_time = now;
             result.sent = true;
         }

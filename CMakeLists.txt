@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(MiniNet
+    src/MiniNet/src/ack_tracker.cpp
     src/MiniNet/src/connection.cpp
     src/MiniNet/src/packet.cpp
     src/MiniNet/src/ping.cpp

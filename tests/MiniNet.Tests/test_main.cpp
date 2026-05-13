@@ -1,3 +1,4 @@
+#include "mininet/ack_tracker.hpp"
 #include "mininet/connection.hpp"
 #include "mininet/packet.hpp"
 #include "mininet/ping.hpp"
@@ -26,9 +27,13 @@ void require(bool condition, const std::string& message)
     }
 }
 
-std::vector<std::uint8_t> make_packet(PacketType type, std::uint32_t sequence, std::uint32_t session_id)
+std::vector<std::uint8_t> make_packet(PacketType type,
+                                      std::uint32_t sequence,
+                                      std::uint32_t session_id,
+                                      std::uint32_t ack = 0,
+                                      std::uint32_t ack_bits = 0)
 {
-    return make_connection_packet(type, sequence, session_id);
+    return make_connection_packet(type, sequence, session_id, ack, ack_bits);
 }
 
 PacketHeader received_header(const UdpSocket& socket, const std::string& message)
@@ -41,33 +46,194 @@ PacketHeader received_header(const UdpSocket& socket, const std::string& message
     return decoded.value_or(PacketHeader{});
 }
 
+bool sent_packet_acked(const AckTracker& tracker, std::uint32_t sequence)
+{
+    for (const auto& record : tracker.sent_packets()) {
+        if (record.sequence == sequence) {
+            return record.acked;
+        }
+    }
+    return false;
+}
+
+bool sent_packet_acked(const std::vector<SentPacketRecord>& sent_packets, std::uint32_t sequence)
+{
+    for (const auto& record : sent_packets) {
+        if (record.sequence == sequence) {
+            return record.acked;
+        }
+    }
+    return false;
+}
+
 void send_from_server(UdpSocket& server, const UdpEndpoint& client, PacketType type, std::uint32_t session_id)
 {
     const auto packet = make_packet(type, 100, session_id);
     server.send_to(packet, client);
 }
 
-void test_packet_header_round_trip()
+void test_packet_header_round_trip_and_byte_order()
 {
-    // header 必须固定为 14 字节，并携带 session_id，避免连接层协议退化。
+    // Header 固定顺序：magic/version/type/sequence/session_id/ack/ack_bits。
     PacketHeader header;
     header.magic = kPacketMagic;
     header.version = kProtocolVersion;
     header.type = PacketType::Heartbeat;
-    header.sequence = 42;
+    header.sequence = 0x01020304;
     header.session_id = 0xAABBCCDD;
+    header.ack = 0x11223344;
+    header.ack_bits = 0x55667788;
 
     const auto encoded = encode_packet_header(header);
     const auto decoded = decode_packet_header(encoded);
 
-    require(kPacketHeaderSize == 14, "PacketHeader size is 14 bytes");
-    require(encoded.size() == 14, "encoded PacketHeader size is 14 bytes");
+    require(kPacketHeaderSize == 22, "PacketHeader size is 22 bytes");
+    require(encoded.size() == 22, "encoded PacketHeader size is 22 bytes");
+    require(encoded[0] == 0x4D && encoded[1] == 0x4E && encoded[2] == 0x45 && encoded[3] == 0x54,
+            "magic uses network byte order");
+    require(encoded[4] == kProtocolVersion, "version follows magic");
+    require(encoded[5] == static_cast<std::uint8_t>(PacketType::Heartbeat), "type follows version");
+    require(encoded[6] == 0x01 && encoded[7] == 0x02 && encoded[8] == 0x03 && encoded[9] == 0x04,
+            "sequence uses network byte order");
+    require(encoded[10] == 0xAA && encoded[11] == 0xBB && encoded[12] == 0xCC && encoded[13] == 0xDD,
+            "session_id uses network byte order");
+    require(encoded[14] == 0x11 && encoded[15] == 0x22 && encoded[16] == 0x33 && encoded[17] == 0x44,
+            "ack uses network byte order");
+    require(encoded[18] == 0x55 && encoded[19] == 0x66 && encoded[20] == 0x77 && encoded[21] == 0x88,
+            "ack_bits uses network byte order");
+
     require(decoded.has_value(), "PacketHeader decodes");
     require(decoded->magic == kPacketMagic, "magic round-trips");
     require(decoded->version == kProtocolVersion, "version round-trips");
     require(decoded->type == PacketType::Heartbeat, "type round-trips");
-    require(decoded->sequence == 42, "sequence round-trips");
+    require(decoded->sequence == 0x01020304, "sequence round-trips");
     require(decoded->session_id == 0xAABBCCDD, "session_id round-trips");
+    require(decoded->ack == 0x11223344, "ack round-trips");
+    require(decoded->ack_bits == 0x55667788, "ack_bits round-trips");
+}
+
+void test_ack_tracker_sequence_allocation_and_comparison()
+{
+    // 出站 sequence 从 1 开始连续分配，并支持 uint32 回绕比较。
+    AckTracker tracker;
+    require(tracker.allocate_send_sequence() == 1, "first send sequence is 1");
+    require(tracker.allocate_send_sequence() == 2, "second send sequence is 2");
+    require(tracker.allocate_send_sequence() == 3, "third send sequence is 3");
+
+    require(sequence_greater_than(1, 0), "1 is greater than 0");
+    require(sequence_greater_than(0, UINT32_MAX), "0 is greater than UINT32_MAX after wrap");
+    require(!sequence_greater_than(UINT32_MAX, 0), "UINT32_MAX is not greater than 0 after wrap");
+    require(!sequence_greater_than(10, 10), "equal sequence is not greater");
+}
+
+void test_ack_tracker_empty_state_and_initial_ack()
+{
+    // 没有接收历史时，ack=0/ack_bits=0 不能误确认已发送包。
+    AckTracker tracker;
+    const auto state = tracker.make_ack_state();
+    require(!state.has_received_sequence, "empty AckState has no received sequence");
+    require(state.ack == 0, "empty AckState ack is 0");
+    require(state.ack_bits == 0, "empty AckState ack_bits is 0");
+
+    tracker.record_sent(1, Clock::now());
+    tracker.process_ack(0, 0);
+    require(!sent_packet_acked(tracker, 1), "initial empty ACK does not ack sent packet");
+}
+
+void test_ack_tracker_record_received_ordering()
+{
+    // record_received 应维护最新 ack，并用 ack_bits 表达乱序历史。
+    AckTracker single;
+    single.record_received(10);
+    auto state = single.make_ack_state();
+    require(state.has_received_sequence, "single receive enables AckState");
+    require(state.ack == 10, "10 -> ack 10");
+    require(state.ack_bits == 0, "single receive has no ack_bits");
+
+    AckTracker ordered;
+    ordered.record_received(10);
+    ordered.record_received(11);
+    ordered.record_received(12);
+    state = ordered.make_ack_state();
+    require(state.ack == 12, "10/11/12 -> ack 12");
+    require((state.ack_bits & 0x1u) != 0, "ack_bits expresses 11");
+    require((state.ack_bits & 0x2u) != 0, "ack_bits expresses 10");
+
+    AckTracker out_of_order;
+    out_of_order.record_received(10);
+    out_of_order.record_received(12);
+    out_of_order.record_received(11);
+    state = out_of_order.make_ack_state();
+    require(state.ack == 12, "10/12/11 -> ack 12");
+    require((state.ack_bits & 0x1u) != 0, "out-of-order ack_bits expresses 11");
+    require((state.ack_bits & 0x2u) != 0, "out-of-order ack_bits expresses 10");
+    out_of_order.record_received(10);
+    state = out_of_order.make_ack_state();
+    require(state.ack == 12, "duplicate 10 does not move ack backward");
+    require((state.ack_bits & 0x3u) == 0x3u, "duplicate 10 does not break ack_bits");
+}
+
+void test_ack_tracker_ack_bits_window()
+{
+    // bit0 表示 ack-1，bit31 表示 ack-32，窗口外不表达。
+    AckTracker adjacent;
+    adjacent.record_received(100);
+    adjacent.record_received(99);
+    adjacent.record_received(98);
+    auto state = adjacent.make_ack_state();
+    require(state.ack == 100, "100/99/98 -> ack 100");
+    require((state.ack_bits & 0x1u) != 0, "bit0 expresses 99");
+    require((state.ack_bits & 0x2u) != 0, "bit1 expresses 98");
+
+    AckTracker gaps;
+    gaps.record_received(100);
+    gaps.record_received(98);
+    gaps.record_received(96);
+    state = gaps.make_ack_state();
+    require(state.ack == 100, "100/98/96 -> ack 100");
+    require((state.ack_bits & 0x1u) == 0, "bit0 remains clear for missing 99");
+    require((state.ack_bits & 0x2u) != 0, "bit1 expresses 98");
+    require((state.ack_bits & 0x4u) == 0, "bit2 remains clear for missing 97");
+    require((state.ack_bits & 0x8u) != 0, "bit3 expresses 96");
+
+    AckTracker edge;
+    edge.record_received(100);
+    edge.record_received(68);
+    edge.record_received(67);
+    state = edge.make_ack_state();
+    require((state.ack_bits & (std::uint32_t{1} << 31)) != 0, "bit31 expresses ack-32");
+    require((state.ack_bits & (std::uint32_t{1} << 30)) == 0, "sequence outside 32-window is not expressed");
+}
+
+void test_ack_tracker_process_ack()
+{
+    // process_ack 标记被 ack 或 ack_bits 覆盖的包，未覆盖包保持 unacked。
+    AckTracker tracker;
+    const auto now = Clock::now();
+    for (std::uint32_t sequence = 7; sequence <= 11; ++sequence) {
+        tracker.record_sent(sequence, now);
+    }
+
+    tracker.process_ack(10, 0);
+    require(sent_packet_acked(tracker, 10), "ack=10 marks sent 10");
+    require(!sent_packet_acked(tracker, 9), "ack=10 alone does not mark 9");
+
+    tracker.process_ack(10, 0x1u);
+    require(sent_packet_acked(tracker, 9), "ack=10 bit0 marks 9");
+    require(!sent_packet_acked(tracker, 8), "missing bit1 keeps 8 unacked");
+
+    tracker.process_ack(10, 0x4u);
+    require(sent_packet_acked(tracker, 7), "ack=10 bit2 marks 7");
+    require(!sent_packet_acked(tracker, 8), "unmentioned sent packet remains unacked");
+
+    tracker.process_ack(10, 0x5u);
+    require(sent_packet_acked(tracker, 10), "duplicate ACK keeps 10 acked");
+    require(sent_packet_acked(tracker, 9), "duplicate ACK keeps 9 acked");
+    require(sent_packet_acked(tracker, 7), "duplicate ACK keeps 7 acked");
+
+    tracker.process_ack(1234, 0);
+    require(!sent_packet_acked(tracker, 8), "unknown sent sequence does not crash or ack unrelated packet");
+    require(!sent_packet_acked(tracker, 11), "unacked packet does not trigger retransmit side effect");
 }
 
 void test_connection_packet_validation()
@@ -87,7 +253,7 @@ void test_connection_packet_validation()
 
 void test_basic_packet_validation_rejections()
 {
-    // 保留基础协议校验回归：非法 header 不应进入上层业务逻辑。
+    // 非法 header 不应进入上层业务逻辑。
     auto valid = make_ping_packet(1);
     require(validate_ping_packet(valid).accepted, "valid Ping is accepted");
 
@@ -105,6 +271,33 @@ void test_basic_packet_validation_rejections()
 
     std::vector<std::uint8_t> too_short(kPacketHeaderSize - 1, 0);
     require(validate_ping_packet(too_short).reason == PacketRejectReason::TooShort, "short packet is rejected");
+}
+
+void test_invalid_packet_does_not_update_ack_state()
+{
+    // 非法连接包不能刷新接收历史，也不能污染后续 ACK。
+    const auto t0 = Clock::now();
+    ConnectionServer server(0);
+    UdpSocket client = UdpSocket::open();
+    const UdpEndpoint server_endpoint{"127.0.0.1", server.port()};
+
+    client.send_to(make_packet(PacketType::ConnectRequest, 1, 0), server_endpoint);
+    server.update(t0, std::chrono::milliseconds(200));
+    const auto accept = received_header(client, "ConnectAccept before invalid packet");
+    const auto session_id = accept.session_id;
+
+    auto bad_heartbeat = make_packet(PacketType::Heartbeat, 55, session_id);
+    bad_heartbeat[0] = 0;
+    client.send_to(bad_heartbeat, server_endpoint);
+    const auto invalid_result = server.update(t0 + std::chrono::milliseconds(100), std::chrono::milliseconds(200));
+    require(invalid_result.reason == PacketRejectReason::BadMagic, "invalid Heartbeat is rejected");
+    require(server.sessions().front().ack_tracker.make_ack_state().ack == 0, "invalid packet does not update ack");
+
+    client.send_to(make_packet(PacketType::Heartbeat, 2, session_id), server_endpoint);
+    server.update(t0 + std::chrono::milliseconds(200), std::chrono::milliseconds(200));
+    const auto reply = received_header(client, "Heartbeat reply after invalid packet");
+    require(reply.ack == 2, "first valid Heartbeat determines ack");
+    require(reply.ack_bits == 0, "invalid sequence is absent from ack_bits");
 }
 
 void test_client_connect_accept_and_timeout()
@@ -170,6 +363,9 @@ void test_client_heartbeat_interval()
     const auto heartbeat = received_header(fake_server, "client Heartbeat after 1 second");
     require(heartbeat.type == PacketType::Heartbeat, "client sends Heartbeat while Connected");
     require(heartbeat.session_id == 9, "client Heartbeat carries session_id");
+    require(heartbeat.sequence == 1, "first client Heartbeat sequence is 1");
+    require(heartbeat.ack == 0, "client Heartbeat has empty ack before receive history");
+    require(heartbeat.ack_bits == 0, "client Heartbeat has empty ack_bits before receive history");
 
     ConnectionClient disconnected_client(server_endpoint);
     disconnected_client.update(t0 + std::chrono::milliseconds(2000));
@@ -225,12 +421,12 @@ void test_server_heartbeat_and_disconnect_rules()
     const auto heartbeat_reply = received_header(client, "server Heartbeat reply");
     require(heartbeat_reply.type == PacketType::Heartbeat, "server replies with Heartbeat");
     require(heartbeat_reply.session_id == session_id, "server Heartbeat reply carries session_id");
+    require(heartbeat_reply.ack == 2, "server Heartbeat reply acknowledges client Heartbeat");
 
     // 错误 session_id 与未知 endpoint 都不能刷新 session，超过 5 秒后会被清理。
     client.send_to(make_packet(PacketType::Heartbeat, 3, session_id + 1), server_endpoint);
     server.update(t0 + std::chrono::milliseconds(5100), std::chrono::milliseconds(200));
     require(server.session_count() == 1, "wrong session_id Heartbeat does not remove session immediately");
-    // 这一轮服务端可能按 1 秒间隔主动发 Heartbeat，先排空，避免后续误当成 ConnectAccept。
     (void)client.receive_from(std::chrono::milliseconds(50));
 
     unknown_client.send_to(make_packet(PacketType::Heartbeat, 4, session_id), server_endpoint);
@@ -257,8 +453,9 @@ void test_server_heartbeat_and_disconnect_rules()
     require(server.session_count() == 0, "server has no session after valid Disconnect");
 }
 
-void test_integration_connect_heartbeat_and_timeout()
+void test_integration_acknowledged_heartbeats()
 {
+    // 握手后多轮 Heartbeat 应携带 ACK，并标记双方已发送包为 acked。
     const auto t0 = Clock::now();
     ConnectionServer server(0);
     ConnectionClient client({"127.0.0.1", server.port()});
@@ -269,22 +466,30 @@ void test_integration_connect_heartbeat_and_timeout()
     require(client.state() == ConnectionState::Connected, "integration connects client");
     require(server.session_count() == 1, "integration creates server session");
 
-    // 客户端 1 秒心跳一次，服务端收到后刷新，连接应保持。
     client.update(t0 + std::chrono::milliseconds(1000));
     server.update(t0 + std::chrono::milliseconds(1000), std::chrono::milliseconds(200));
     client.update(t0 + std::chrono::milliseconds(1000), std::chrono::milliseconds(200));
     require(client.state() == ConnectionState::Connected, "heartbeat keeps client connected");
     require(server.session_count() == 1, "heartbeat keeps server session alive");
+    require(sent_packet_acked(client.sent_packets(), 1), "client marks first Heartbeat acked from server ACK");
 
-    // 不再驱动客户端发送心跳，只推进服务端时间，服务端应在 5 秒后清理 session。
-    const auto timeout_result = server.update(t0 + std::chrono::milliseconds(6101));
+    client.update(t0 + std::chrono::milliseconds(2000));
+    server.update(t0 + std::chrono::milliseconds(2000), std::chrono::milliseconds(200));
+    require(server.sessions().size() == 1, "server still has one session after second Heartbeat");
+    require(sent_packet_acked(server.sessions().front().ack_tracker, 1),
+            "server marks first Heartbeat acked from client ACK");
+
+    client.update(t0 + std::chrono::milliseconds(2000), std::chrono::milliseconds(200));
+    require(sent_packet_acked(client.sent_packets(), 2), "client marks second Heartbeat acked from server ACK");
+
+    const auto timeout_result = server.update(t0 + std::chrono::milliseconds(7101));
     require(!timeout_result.timed_out_sessions.empty(), "server reports timed-out session");
     require(server.session_count() == 0, "server cleans session after heartbeat stops");
 }
 
 void test_ping_pong_integration()
 {
-    // 保留前序 issue 的 Ping/Pong 回归测试，确保连接层改动不破坏基础 UDP 包。
+    // 保留前序 issue 的 Ping/Pong 回归测试，确认 header 扩展不破坏基础 UDP 包。
     PingServer server(0);
     UdpSocket client = UdpSocket::open();
     const UdpEndpoint server_endpoint{"127.0.0.1", server.port()};
@@ -309,7 +514,7 @@ void test_ping_pong_integration()
 
 void test_server_drops_invalid_packets()
 {
-    // 服务端收到非法包时应丢弃，不应该回 Pong。
+    // PingServer 收到非法包时应丢弃，不应该回 Pong。
     PingServer server(0);
     UdpSocket client = UdpSocket::open();
     const UdpEndpoint server_endpoint{"127.0.0.1", server.port()};
@@ -332,14 +537,20 @@ void test_server_drops_invalid_packets()
 int main()
 {
     // 不引入第三方测试框架，避免学习项目早期增加依赖和网络下载成本。
-    test_packet_header_round_trip();
+    test_packet_header_round_trip_and_byte_order();
+    test_ack_tracker_sequence_allocation_and_comparison();
+    test_ack_tracker_empty_state_and_initial_ack();
+    test_ack_tracker_record_received_ordering();
+    test_ack_tracker_ack_bits_window();
+    test_ack_tracker_process_ack();
     test_connection_packet_validation();
     test_basic_packet_validation_rejections();
+    test_invalid_packet_does_not_update_ack_state();
     test_client_connect_accept_and_timeout();
     test_client_heartbeat_interval();
     test_server_connect_request_and_duplicate();
     test_server_heartbeat_and_disconnect_rules();
-    test_integration_connect_heartbeat_and_timeout();
+    test_integration_acknowledged_heartbeats();
     test_ping_pong_integration();
     test_server_drops_invalid_packets();
 

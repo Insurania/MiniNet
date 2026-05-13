@@ -14,8 +14,8 @@ constexpr std::uint32_t kPacketMagic = 0x4D4E4554;
 // 当前协议版本。接收端只接受同版本包，避免不同 header 格式混在一起解析。
 constexpr std::uint8_t kProtocolVersion = 1;
 
-// 固定 header 长度：magic(4) + version(1) + type(1) + sequence(4) + session_id(4)。
-constexpr std::size_t kPacketHeaderSize = 14;
+// 固定 header 长度：magic(4) + version(1) + type(1) + sequence(4) + session_id(4) + ack(4) + ack_bits(4)。
+constexpr std::size_t kPacketHeaderSize = 22;
 
 // MiniNet 当前认识的包类型。UDP 只有字节，type 用来表达业务层语义。
 enum class PacketType : std::uint8_t {
@@ -56,6 +56,12 @@ struct PacketHeader {
 
     // 逻辑连接 id。ConnectRequest 必须为 0，ConnectAccept 和连接内包必须为非 0。
     std::uint32_t session_id = 0;
+
+    // 对端最近收到的本方 sequence；没有收到过任何包时为 0。
+    std::uint32_t ack = 0;
+
+    // 对 ack 前 32 个 sequence 的位图确认；bit0 表示 ack-1，bit31 表示 ack-32。
+    std::uint32_t ack_bits = 0;
 };
 
 // 包校验结果。accepted 表示是否可进入业务逻辑，header 保存能解析出的头部信息。
