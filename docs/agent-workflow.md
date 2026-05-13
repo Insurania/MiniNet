@@ -159,6 +159,20 @@ gh issue edit N --repo Insurania/MiniNet --body-file docs/tmp/issue-N-body.md
 - 非法输入。
 - 超时或失败路径。
 - 和当前 issue 相关的回归测试。
+- 终端可见的测试过程和关键结果，而不是只有最终成功信息。
+
+测试输出要求：
+
+- 每个测试组应输出开始和通过信息。
+- 对学习有帮助的关键值应输出，例如 `sequence`、`ack`、`ack_bits`、`session_id`、packet type、timeout 结果。
+- 输出要简洁，避免大量无意义逐行 dump。
+- 运行测试时优先使用能显示 stdout 的命令，例如：
+
+```powershell
+ctest --test-dir build --output-on-failure --verbose
+```
+
+必要时可以直接运行测试可执行文件，以便查看完整测试过程。
 
 输出：
 

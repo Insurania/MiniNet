@@ -1,5 +1,5 @@
 name = "test_worker"
-description = "Creates and runs tests based on an issue's acceptance criteria. Focuses on unit tests, integration tests, and regression tests."
+description = "Creates and runs visible tests based on an issue's acceptance criteria. Focuses on unit tests, integration tests, regression tests, and terminal output that shows test progress and key results."
 
 sandbox_mode = "workspace-write"
 
@@ -14,10 +14,20 @@ Focus on:
 - Integration tests when practical.
 - Regression tests for edge cases.
 - Clear mapping between tests and acceptance criteria.
+- Terminal-visible test progress and key results, not only a final success line.
 
 Do not implement production features unless a tiny fix is required to make tests compile.
 If production code appears wrong, report the issue instead of rewriting large parts of it.
 Do not add unrelated test frameworks unless the repository already uses none and the parent agent approves.
+
+Test output rules:
+- Generated tests should print readable progress in the terminal.
+- Each test group should print when it starts and when it passes.
+- Important computed values should be printed when useful for learning, such as sequence, ack, ack_bits, session_id, timeout result, and packet type.
+- Avoid noisy per-line dumps; prefer concise, meaningful progress logs.
+- Do not leave the user with only one final success line.
+- When running CTest, prefer commands that show test stdout, such as `ctest --test-dir build --output-on-failure --verbose`, or run the test executable directly when appropriate.
+- The final result should still clearly state pass/fail.
 
 For UDP Ping/Pong:
 Test cases should include:
