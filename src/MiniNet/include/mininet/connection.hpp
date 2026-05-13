@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mininet/ack_tracker.hpp"
 #include "mininet/packet.hpp"
 #include "mininet/udp_socket.hpp"
 
@@ -41,6 +42,9 @@ struct ServerSession {
 
     // 最近一次向该会话发包的时间，用于 heartbeat 节流。
     std::chrono::steady_clock::time_point last_send_time{};
+
+    // 该会话独立的 sequence/ACK 状态；不同客户端之间不能共享确认窗口。
+    AckTracker ack_tracker;
 };
 
 // 客户端 update 的结果，用于测试和日志观察本轮状态机做了什么。
@@ -86,7 +90,11 @@ struct ConnectionServerUpdateResult {
 };
 
 // 构造只有 header 的连接控制包。连接层当前不定义 payload。
-std::vector<std::uint8_t> make_connection_packet(PacketType type, std::uint32_t sequence, std::uint32_t session_id);
+std::vector<std::uint8_t> make_connection_packet(PacketType type,
+                                                 std::uint32_t sequence,
+                                                 std::uint32_t session_id,
+                                                 std::uint32_t ack = 0,
+                                                 std::uint32_t ack_bits = 0);
 
 // UDP 虚拟连接客户端。调用方显式调用 connect/update/disconnect 推进状态机。
 class ConnectionClient {
@@ -102,6 +110,9 @@ public:
 
     // 返回客户端本地 UDP 端口，便于测试或日志观察。
     std::uint16_t local_port() const;
+
+    // 返回客户端已发送连接内包快照，便于测试和调试观察 ACK 状态。
+    const std::vector<SentPacketRecord>& sent_packets() const;
 
     // 发送 ConnectRequest 并进入 Connecting；ConnectRequest 的 session_id 必须为 0。
     ConnectionClientUpdateResult connect(std::chrono::steady_clock::time_point now);
@@ -129,8 +140,8 @@ private:
     // 服务端分配的 session id；未连接时为 0。
     std::uint32_t session_id_ = 0;
 
-    // 客户端发包序号，当前用于让日志和测试区分不同控制包。
-    std::uint32_t next_sequence_ = 1;
+    // 客户端连接内 sequence/ACK 状态；ConnectRequest 不纳入可靠确认。
+    AckTracker ack_tracker_;
 
     // 最近一次收到合法连接内包的时间，用于 timeout。
     std::chrono::steady_clock::time_point last_recv_time_{};
@@ -174,7 +185,7 @@ private:
     // 下一个可分配 session id。0 保留给未连接/ConnectRequest。
     std::uint32_t next_session_id_ = 1;
 
-    // 服务端发包序号，当前用于让日志和测试区分不同控制包。
+    // 服务端握手包发包序号；连接内包使用各 session 自己的 AckTracker。
     std::uint32_t next_sequence_ = 1;
 };
 

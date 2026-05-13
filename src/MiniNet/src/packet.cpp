@@ -70,6 +70,8 @@ std::array<std::uint8_t, kPacketHeaderSize> encode_packet_header(const PacketHea
     bytes[5] = static_cast<std::uint8_t>(header.type);
     write_u32_be(bytes, 6, header.sequence);
     write_u32_be(bytes, 10, header.session_id);
+    write_u32_be(bytes, 14, header.ack);
+    write_u32_be(bytes, 18, header.ack_bits);
     return bytes;
 }
 
@@ -92,6 +94,8 @@ std::optional<PacketHeader> decode_packet_header(ByteView bytes)
     header.type = static_cast<PacketType>(raw_type);
     header.sequence = read_u32_be(bytes, 6);
     header.session_id = read_u32_be(bytes, 10);
+    header.ack = read_u32_be(bytes, 14);
+    header.ack_bits = read_u32_be(bytes, 18);
     return header;
 }
 
