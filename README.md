@@ -20,11 +20,11 @@ MiniNet 是一个学习型项目，目标是在实现一个简化版游戏网络
 
 ## 计划功能
 
-- UDP Ping/Pong
-- 逻辑连接握手
-- 心跳与超时
-- 包序号
-- ACK 与 ACK bits
+- UDP Ping/Pong：已完成
+- 逻辑连接握手：已完成
+- 心跳与超时：已完成
+- 包序号：已完成
+- ACK 与 ACK bits：已完成
 - 可靠消息
 - 丢包重传
 - 不可靠状态同步
@@ -45,11 +45,49 @@ MiniNet/
     roadmap.md
   src/
     MiniNet/
+      include/mininet/
+      src/
     MiniNet.Client/
     MiniNet.Server/
   tests/
     MiniNet.Tests/
 ```
+
+## 已实现能力
+
+当前 MiniNet 已实现：
+
+- Typed packet header：`magic / version / type / sequence / session_id / ack / ack_bits`
+- UDP Ping/Pong
+- 基础 packet 编码、解码和校验
+- UDP virtual connection
+- Client 状态：`Disconnected / Connecting / Connected / TimedOut`
+- Server session 管理
+- `ConnectRequest / ConnectAccept / Disconnect / Heartbeat`
+- 1 秒 heartbeat
+- 5 秒 timeout
+- Packet sequence 分配
+- `ack` 和 `ack_bits` 生成
+- Sent packet acked/unacked 状态追踪
+- `uint32_t` sequence wrap-around comparison
+
+当前仍未实现：
+
+- Reliable message
+- Retransmission
+- Ordered delivery
+- Congestion control
+- RTT 平滑估计
+- 不可靠状态同步
+- 网络延迟、丢包、乱序模拟
+
+## 核心模块
+
+- `packet`：负责固定 packet header 的编码、解码和基础校验。
+- `udp_socket`：封装 UDP socket 的发送、接收和超时等待。
+- `ping`：实现最小 Ping/Pong 示例。
+- `connection`：实现 UDP 之上的 virtual connection、heartbeat、timeout 和 disconnect。
+- `ack_tracker`：实现 sequence 分配、received history、sent history、ACK 和 ACK bits。
 
 ## 推荐协作流程
 
@@ -99,4 +137,6 @@ ctest --test-dir build --output-on-failure
 - 已建立项目目录结构。
 - 已添加 README、路线图、issue 模板和 PR 模板。
 - 已实现 issue #1：UDP Ping/Pong、typed packet header、基础包校验和本地测试。
-- 尚未实现连接、心跳、ACK、重传、可靠消息和不可靠状态同步。
+- 已实现 issue #3：UDP virtual connection、session、heartbeat、timeout 和 disconnect。
+- 已实现 issue #6：packet sequence、ACK 和 ACK bits。
+- 尚未实现重传、可靠消息、不可靠状态同步和网络模拟器。
