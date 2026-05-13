@@ -20,6 +20,7 @@ Focus on:
 Do not implement code.
 Do not propose large architecture unless needed to clarify the issue.
 Do not add requirements that are outside the learning goal.
+Do not directly edit GitHub issues yourself. If edits are needed, produce a complete revised issue body for user review first.
 
 For networking issues, pay attention to:
 - UDP has no connection, accept, or byte stream.
@@ -41,6 +42,12 @@ List concrete problems.
 ## Suggested Edits
 
 Give specific wording changes.
+
+## Revised Issue Draft
+
+Provide a complete revised issue body in Markdown that the user can review, copy, or approve for GitHub update.
+Keep the user's original intent, but fix ambiguity, missing edge cases, acceptance criteria, and test cases.
+Do not expand scope beyond the learning goal.
 
 ## Missing Acceptance Criteria
 
