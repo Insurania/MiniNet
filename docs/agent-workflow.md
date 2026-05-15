@@ -6,14 +6,42 @@
 
 ## 标准流程
 
-对每个 GitHub issue，默认按以下顺序处理：
+GitHub issue 不再一律使用同样重的流程。开始 issue 前，Codex 应先判断规模：
+
+- `small`：文档、注释、模板、README、小测试修正。使用轻量流程，不启动完整 subagent。
+- `normal`：边界清楚的普通功能。使用精简四 agent 工作流。
+- `large`：协议设计变化、复杂状态机、跨模块重构或高风险改动。使用完整四 agent 工作流。
+
+### small 轻量流程
+
+适用场景：文档、规则、模板、注释、小型配置、README 更新。
+
+流程：
+
+```text
+阅读相关文件 -> 最小修改 -> 构建/测试或说明无需测试 -> 提交/推送
+```
+
+### normal 精简四 agent 工作流
+
+适用场景：大多数功能 issue。
+
+流程仍然是：
 
 1. `issue_reviewer`
 2. `architecture_planner`
 3. `implementation_worker`
 4. `test_worker`
 
-除非你明确要求跳过某一步，否则不要直接进入实现。
+但每个 agent 只接收与当前 issue 直接相关的 issue 内容、项目规则摘要、相关文件和上一步结论。输出优先给结论、风险、修改点和测试结果，避免重复项目背景。
+
+### large 完整四 agent 工作流
+
+适用场景：协议格式变化、状态机重构、可靠传输策略变化、跨模块设计、风险较高的 issue。
+
+流程同标准四 agent，但允许更详细的方案、风险分析和测试矩阵。
+
+除非你明确要求跳过某一步，否则 `normal` 和 `large` issue 不要直接进入实现。
 
 ## Step 1: issue_reviewer
 
@@ -101,6 +129,13 @@ gh issue edit N --repo Insurania/MiniNet --body-file docs/tmp/issue-N-body.md
 - Implementation Order。
 - Test Mapping。
 - Non-goals Preserved。
+
+保存规则：
+
+- `architecture_planner` 必须把最终架构方案保存到 `docs/architecture-plans/`。
+- 文件命名使用 `issue-N-short-title.md`，例如 `issue-8-reliable-unordered-messages.md`。
+- 保存的文档应包含与最终回复相同的主要章节，方便你后续学习和复盘。
+- `architecture_planner` 只允许写这个架构方案文档，不应该修改生产代码、测试、构建文件或 README。
 
 人工确认点：
 
@@ -202,6 +237,8 @@ Codex 应该按顺序执行：
 ```text
 issue_reviewer -> architecture_planner -> implementation_worker -> test_worker
 ```
+
+Codex 应先说明本次 issue 属于 `small`、`normal` 还是 `large`，并采用对应流程。
 
 如果 GitHub CLI 或网络不可用，Codex 应要求你粘贴 issue 内容，不要反复要求登录或重装。
 

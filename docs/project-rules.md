@@ -156,12 +156,23 @@ Review 重点看：
 使用 AI agent 时，尽量遵循：
 
 - 先给 issue，再让 AI 实现。
-- 对 GitHub issue 默认使用标准 agent workflow：`issue_reviewer -> architecture_planner -> implementation_worker -> test_worker`。
+- 开始 issue 前先判断规模：`small`、`normal`、`large`。
+- `small` 修改使用轻量流程，不启动完整 subagent。
+- `normal` 功能 issue 使用精简四 agent 工作流：`issue_reviewer -> architecture_planner -> implementation_worker -> test_worker`。
+- `large` 或高风险 issue 使用完整四 agent 工作流。
 - 让 AI 说明计划，但不要一次性实现太大范围。
 - 要求 AI 保持改动小而可 review。
 - 要求 AI 运行测试或说明为什么不能运行。
 - 对 AI 生成代码进行人工 review。
 - 不直接接受看不懂的实现，先要求解释。
+
+Token 使用规则：
+
+- 小型文档、注释、模板、README 修改，不启动完整 subagent 工作流。
+- 普通功能 issue 默认使用精简四 agent 工作流，只给每个 agent 当前 issue 必要上下文。
+- 只有涉及协议设计变化、跨模块重构、复杂状态机或你明确要求时，才使用完整工作流。
+- 每个 agent 输出优先给结论、修改点、风险和测试结果，避免重复项目背景。
+- `architecture_planner` 的输出必须保存到 `docs/architecture-plans/`，方便学习和复盘。
 
 AI 可以帮助：
 
