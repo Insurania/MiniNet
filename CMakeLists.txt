@@ -11,6 +11,7 @@ add_library(MiniNet
     src/MiniNet/src/connection.cpp
     src/MiniNet/src/packet.cpp
     src/MiniNet/src/ping.cpp
+    src/MiniNet/src/reliable_message.cpp
     src/MiniNet/src/udp_socket.cpp
 )
 

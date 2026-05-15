@@ -25,6 +25,7 @@ enum class PacketType : std::uint8_t {
     ConnectAccept = 4,
     Disconnect = 5,
     Heartbeat = 6,
+    ReliableData = 7,
 };
 
 // 包被拒绝的原因。调用方可以用它输出日志或在测试中判断具体失败点。
@@ -144,6 +145,9 @@ PacketValidationResult validate_connect_accept_packet(ByteView bytes);
 
 // 校验 Heartbeat；这里只做包头和类型校验，session 匹配交给 connection 层。
 PacketValidationResult validate_heartbeat_packet(ByteView bytes);
+
+// 校验 ReliableData；这里只检查 header 和 type，payload 格式交给 reliable_message 模块解析。
+PacketValidationResult validate_reliable_data_packet(ByteView bytes);
 
 // 校验 Disconnect；这里只做包头和类型校验，session 匹配交给 connection 层。
 PacketValidationResult validate_disconnect_packet(ByteView bytes);

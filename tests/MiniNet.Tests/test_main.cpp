@@ -2,6 +2,7 @@
 #include "mininet/connection.hpp"
 #include "mininet/packet.hpp"
 #include "mininet/ping.hpp"
+#include "mininet/reliable_message.hpp"
 #include "mininet/udp_socket.hpp"
 
 #include <chrono>
@@ -17,14 +18,50 @@ using namespace mininet;
 using Clock = std::chrono::steady_clock;
 
 int failures = 0;
+std::string current_test;
 
 void require(bool condition, const std::string& message)
 {
     // 简单测试框架：记录所有失败点，便于一次看到多个验收项。
     if (!condition) {
         ++failures;
-        std::cerr << "FAILED: " << message << '\n';
+        std::cerr << "[FAIL] " << current_test << ": " << message << '\n';
     }
+}
+
+void log_value(const std::string& message)
+{
+    std::cout << "  " << message << '\n';
+}
+
+void run_test(const std::string& name, void (*test)())
+{
+    current_test = name;
+    const auto before = failures;
+    std::cout << "[RUN] " << name << '\n';
+    test();
+    if (failures == before) {
+        std::cout << "[PASS] " << name << '\n';
+    } else {
+        std::cout << "[FAIL] " << name << " added " << (failures - before) << " failure(s)\n";
+    }
+}
+
+std::vector<std::uint8_t> bytes(std::initializer_list<std::uint8_t> values)
+{
+    return {values.begin(), values.end()};
+}
+
+std::string byte_list(const std::vector<std::uint8_t>& values)
+{
+    std::string text;
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index != 0) {
+            text += ",";
+        }
+        text += std::to_string(values[index]);
+    }
+    return text;
 }
 
 std::vector<std::uint8_t> make_packet(PacketType type,
@@ -532,27 +569,344 @@ void test_server_drops_invalid_packets()
     require(!response.has_value(), "client receives no Pong for invalid packet");
 }
 
+void test_reliable_sender_message_ids_are_independent()
+{
+    const auto t0 = Clock::now();
+    ReliableSender first;
+    ReliableSender second;
+
+    require(first.enqueue(bytes({1}), t0), "first sender queues message 1");
+    require(first.enqueue(bytes({2}), t0), "first sender queues message 2");
+    require(second.enqueue(bytes({9}), t0), "second sender queues message 1 independently");
+
+    const auto first_messages = first.select_messages_for_packet(t0, kMaxDatagramSize - kPacketHeaderSize);
+    const auto second_messages = second.select_messages_for_packet(t0, kMaxDatagramSize - kPacketHeaderSize);
+
+    log_value("first_sender ids=" + std::to_string(first_messages[0].message_id) + "," +
+              std::to_string(first_messages[1].message_id));
+    log_value("second_sender first_id=" + std::to_string(second_messages[0].message_id));
+    require(first_messages.size() == 2, "first sender selects two messages");
+    require(first_messages[0].message_id == 1, "first sender starts message_id at 1");
+    require(first_messages[1].message_id == 2, "first sender increments message_id");
+    require(second_messages.size() == 1, "second sender selects one message");
+    require(second_messages[0].message_id == 1, "second sender has independent message_id sequence");
+}
+
+void test_reliable_sender_pending_delivery_and_packet_selection()
+{
+    const auto t0 = Clock::now();
+    ReliableSender sender;
+    require(sender.enqueue(bytes({10}), t0), "queues first reliable message");
+    require(sender.enqueue(bytes({20}), t0), "queues second reliable message");
+    require(sender.pending_count() == 2, "new reliable messages are pending");
+
+    const auto selected = sender.select_messages_for_packet(t0, kMaxDatagramSize - kPacketHeaderSize);
+    sender.mark_packet_sent(10, selected, t0);
+    log_value("packet_seq=10 message_ids=" + std::to_string(selected[0].message_id) + "," +
+              std::to_string(selected[1].message_id) + " pending_count=" + std::to_string(sender.pending_count()));
+
+    sender.process_acked_packets({SentPacketRecord{10, t0, false}});
+    require(sender.pending_count() == 2, "unacked packet keeps messages pending");
+    require(sender.select_messages_for_packet(t0 + std::chrono::milliseconds(249), kMaxDatagramSize - kPacketHeaderSize).empty(),
+            "sent but undelivered messages do not resend before interval");
+
+    sender.process_acked_packets({SentPacketRecord{10, t0, true}});
+    log_value("after_ack_10 pending_count=" + std::to_string(sender.pending_count()));
+    require(sender.pending_count() == 0, "acked packet removes delivered messages from pending queue");
+    require(sender.select_messages_for_packet(t0 + std::chrono::milliseconds(500), kMaxDatagramSize - kPacketHeaderSize).empty(),
+            "delivered messages are not selected for later packets");
+}
+
+void test_reliable_data_encoding_decoding_round_trip()
+{
+    const ReliableMessage one{7, bytes({1, 2, 3, 255})};
+    const auto one_payload = encode_reliable_data_payload({one});
+    const auto one_decoded = decode_reliable_data_payload(one_payload);
+    log_value("single encoded_size=" + std::to_string(one_payload.size()) + " payload=" +
+              byte_list(one_decoded.messages.empty() ? std::vector<std::uint8_t>{} : one_decoded.messages[0].payload));
+    require(one_decoded.ok, "single reliable message decodes");
+    require(one_decoded.messages.size() == 1, "single reliable message count round-trips");
+    require(one_decoded.messages[0].message_id == 7, "single message_id round-trips");
+    require(one_decoded.messages[0].payload == one.payload, "single payload bytes round-trip");
+
+    const std::vector<ReliableMessage> many{{1, bytes({42})}, {2, bytes({0, 1, 2, 3})}, {3, {}}};
+    const auto many_payload = encode_reliable_data_payload(many);
+    const auto many_decoded = decode_reliable_data_payload(many_payload);
+    log_value("multi encoded_size=" + std::to_string(many_payload.size()) + " message_count=" +
+              std::to_string(many_decoded.messages.size()));
+    require(many_decoded.ok, "multiple reliable messages decode");
+    require(many_decoded.messages.size() == many.size(), "multiple message count round-trips");
+    for (std::size_t index = 0; index < many.size() && index < many_decoded.messages.size(); ++index) {
+        require(many_decoded.messages[index].message_id == many[index].message_id, "multi message_id round-trips");
+        require(many_decoded.messages[index].payload == many[index].payload, "multi payload bytes round-trip");
+    }
+}
+
+void test_reliable_data_decode_rejects_malformed_payloads()
+{
+    const auto payload_too_long = bytes({1, 0, 0, 0, 5, 0, 4, 9, 9});
+    const auto count_mismatch = bytes({2, 0, 0, 0, 1, 0, 1, 7});
+    const auto truncated_header = bytes({1, 0, 0, 0});
+    const auto trailing_bytes = bytes({0, 123});
+
+    const auto too_long = decode_reliable_data_payload(payload_too_long);
+    const auto mismatch = decode_reliable_data_payload(count_mismatch);
+    const auto truncated = decode_reliable_data_payload(truncated_header);
+    const auto trailing = decode_reliable_data_payload(trailing_bytes);
+
+    log_value("malformed payload_size_too_long ok=" + std::to_string(too_long.ok));
+    log_value("malformed count_mismatch ok=" + std::to_string(mismatch.ok));
+    require(!too_long.ok && too_long.messages.empty(), "payload_size beyond bytes fails without messages");
+    require(!mismatch.ok && mismatch.messages.empty(), "message_count mismatch fails without crash");
+    require(!truncated.ok && truncated.messages.empty(), "truncated message header fails without crash");
+    require(!trailing.ok && trailing.messages.empty(), "extra trailing bytes fail without crash");
+}
+
+void test_reliable_sender_max_datagram_and_available_space()
+{
+    const auto t0 = Clock::now();
+    ReliableSender sender;
+    const auto max_payload_size = kMaxDatagramSize - kPacketHeaderSize - 1 - kReliableMessageOverhead;
+    require(sender.enqueue(std::vector<std::uint8_t>(max_payload_size, 1), t0), "max fitting payload queues");
+    require(!sender.enqueue(std::vector<std::uint8_t>(max_payload_size + 1, 2), t0), "oversized payload is rejected");
+
+    const auto exact = sender.select_messages_for_packet(t0, kMaxDatagramSize - kPacketHeaderSize);
+    log_value("max_datagram_size=" + std::to_string(kMaxDatagramSize) + " max_payload_size=" +
+              std::to_string(max_payload_size) + " selected_count=" + std::to_string(exact.size()));
+    require(exact.size() == 1, "max fitting payload is packable");
+
+    ReliableSender tight_sender;
+    require(tight_sender.enqueue(std::vector<std::uint8_t>(100, 3), t0), "queues payload for tight space test");
+    const auto too_tight = tight_sender.select_messages_for_packet(t0, 1 + kReliableMessageOverhead + 99);
+    const auto enough = tight_sender.select_messages_for_packet(t0, 1 + kReliableMessageOverhead + 100);
+    log_value("available_too_tight_selected=" + std::to_string(too_tight.size()) +
+              " available_exact_selected=" + std::to_string(enough.size()));
+    require(too_tight.empty(), "message exceeding available space is not packed this round");
+    require(enough.size() == 1, "message is packed when available space is sufficient");
+}
+
+void test_reliable_packet_mapping_and_ack_delivery()
+{
+    const auto t0 = Clock::now();
+    ReliableSender unknown_ack_sender;
+    require(unknown_ack_sender.enqueue(bytes({1}), t0), "queues message before unknown ack");
+    unknown_ack_sender.process_acked_packets({SentPacketRecord{999, t0, true}});
+    log_value("unknown_ack_seq=999 pending_count=" + std::to_string(unknown_ack_sender.pending_count()));
+    require(unknown_ack_sender.pending_count() == 1, "ACK for unknown packet mapping does not crash or deliver");
+
+    ReliableSender sender;
+    require(sender.enqueue(bytes({1}), t0), "queues mapped message 1");
+    require(sender.enqueue(bytes({2}), t0), "queues mapped message 2");
+    const auto selected = sender.select_messages_for_packet(t0, kMaxDatagramSize - kPacketHeaderSize);
+    sender.mark_packet_sent(10, selected, t0);
+    log_value("packet_seq=10 carries message_ids=" + std::to_string(selected[0].message_id) + "," +
+              std::to_string(selected[1].message_id));
+
+    sender.process_acked_packets({SentPacketRecord{10, t0, true}});
+    require(!sender.is_pending(1), "ACK 10 delivers message 1");
+    require(!sender.is_pending(2), "ACK 10 delivers message 2");
+    require(sender.pending_count() == 0, "mapping cleanup leaves no pending messages");
+
+    sender.process_acked_packets({SentPacketRecord{10, t0, true}});
+    require(sender.pending_count() == 0, "duplicate ACK after mapping cleanup is harmless");
+}
+
+void test_reliable_resend_timing_and_delivery()
+{
+    const auto t0 = Clock::now();
+    ReliableSender sender;
+    require(sender.enqueue(bytes({8}), t0), "queues message for resend");
+    const auto first = sender.select_messages_for_packet(t0, kMaxDatagramSize - kPacketHeaderSize);
+    sender.mark_packet_sent(1, first, t0);
+    require(first.size() == 1, "first send selects message");
+
+    const auto before_interval = sender.select_messages_for_packet(t0 + std::chrono::milliseconds(249),
+                                                                   kMaxDatagramSize - kPacketHeaderSize);
+    const auto after_interval = sender.select_messages_for_packet(t0 + std::chrono::milliseconds(250),
+                                                                  kMaxDatagramSize - kPacketHeaderSize);
+    log_value("first_seq=1 resend_before_250ms=" + std::to_string(before_interval.size()) +
+              " resend_at_250ms=" + std::to_string(after_interval.size()));
+    require(before_interval.empty(), "message does not resend before 250ms");
+    require(after_interval.size() == 1 && after_interval[0].message_id == first[0].message_id,
+            "message can resend after 250ms");
+
+    sender.mark_packet_sent(2, after_interval, t0 + std::chrono::milliseconds(250));
+    sender.process_acked_packets({SentPacketRecord{2, t0 + std::chrono::milliseconds(250), true}});
+    require(sender.pending_count() == 0, "ACK for resend packet delivers message");
+    require(sender.select_messages_for_packet(t0 + std::chrono::milliseconds(1000), kMaxDatagramSize - kPacketHeaderSize).empty(),
+            "delivered message does not resend");
+}
+
+void test_reliable_receiver_deduplicates_per_instance()
+{
+    ReliableReceiver receiver;
+    const auto first = receiver.receive(ReliableMessage{5, bytes({1})});
+    const auto duplicate = receiver.receive(ReliableMessage{5, bytes({2})});
+    const auto different = receiver.receive(ReliableMessage{6, bytes({3})});
+
+    ReliableReceiver other_receiver;
+    const auto same_id_other_receiver = other_receiver.receive(ReliableMessage{5, bytes({4})});
+
+    log_value("id=5 first_should_process=" + std::to_string(first.should_process) +
+              " duplicate_should_process=" + std::to_string(duplicate.should_process));
+    log_value("id=6 should_process=" + std::to_string(different.should_process) +
+              " other_receiver_id5_should_process=" + std::to_string(same_id_other_receiver.should_process));
+    require(first.should_process, "first message_id 5 should process");
+    require(!duplicate.should_process, "duplicate message_id 5 should not process");
+    require(different.should_process, "different message id should process");
+    require(same_id_other_receiver.should_process, "different receiver/session same id should process independently");
+}
+
+void test_integration_client_to_server_reliable_resend_and_cleanup()
+{
+    const auto t0 = Clock::now();
+    UdpSocket fake_server = UdpSocket::bind(0);
+    const UdpEndpoint server_endpoint{"127.0.0.1", fake_server.local_port()};
+    ConnectionClient client(server_endpoint);
+
+    client.connect(t0);
+    const auto request = fake_server.receive_from(std::chrono::milliseconds(200));
+    require(request.has_value(), "fake server receives ConnectRequest");
+    const auto accept = make_connection_packet(PacketType::ConnectAccept, 100, 77);
+    fake_server.send_to(accept, request->sender);
+    client.update(t0 + std::chrono::milliseconds(1), std::chrono::milliseconds(200));
+    require(client.state() == ConnectionState::Connected, "client connects to fake server");
+
+    const auto app_payload = bytes({9, 8, 7});
+    require(client.send_reliable(app_payload, t0 + std::chrono::milliseconds(10)), "client queues reliable payload");
+    require(client.reliable_pending_count() == 1, "client pending count is 1 after queue");
+
+    client.update(t0 + std::chrono::milliseconds(10));
+    const auto first_packet = fake_server.receive_from(std::chrono::milliseconds(200));
+    require(first_packet.has_value(), "fake server receives first ReliableData");
+    const auto first_header = decode_packet_header(first_packet->bytes);
+    require(first_header.has_value(), "first ReliableData header decodes");
+    const auto first_decoded = decode_reliable_data_payload(
+        ByteView(first_packet->bytes.data() + kPacketHeaderSize, first_packet->bytes.size() - kPacketHeaderSize));
+    ReliableReceiver server_receiver;
+    const auto first_received = server_receiver.receive(first_decoded.messages[0]);
+    log_value("client_to_server first_seq=" + std::to_string(first_header->sequence) +
+              " message_id=" + std::to_string(first_received.message_id) +
+              " should_process=" + std::to_string(first_received.should_process) +
+              " pending_count=" + std::to_string(client.reliable_pending_count()));
+    require(first_decoded.ok, "server decodes first client ReliableData");
+    require(first_received.should_process, "server processes first client reliable message");
+
+    client.update(t0 + std::chrono::milliseconds(249));
+    require(!fake_server.receive_from(std::chrono::milliseconds(50)).has_value(), "client does not resend before 250ms");
+
+    client.update(t0 + std::chrono::milliseconds(260));
+    const auto resend_packet = fake_server.receive_from(std::chrono::milliseconds(200));
+    require(resend_packet.has_value(), "fake server receives client resend after missing ACK");
+    const auto resend_header = decode_packet_header(resend_packet->bytes);
+    const auto resend_decoded = decode_reliable_data_payload(
+        ByteView(resend_packet->bytes.data() + kPacketHeaderSize, resend_packet->bytes.size() - kPacketHeaderSize));
+    const auto duplicate_received = server_receiver.receive(resend_decoded.messages[0]);
+    log_value("client_to_server resend_seq=" + std::to_string(resend_header->sequence) +
+              " duplicate_should_process=" + std::to_string(duplicate_received.should_process));
+    require(resend_header->sequence != first_header->sequence, "resend uses a new packet sequence");
+    require(!duplicate_received.should_process, "server deduplicates resent client reliable message");
+
+    const auto ack = make_connection_packet(PacketType::Heartbeat, 200, 77, resend_header->sequence, 0);
+    fake_server.send_to(ack, resend_packet->sender);
+    client.update(t0 + std::chrono::milliseconds(270), std::chrono::milliseconds(200));
+    log_value("client_to_server after_ack pending_count=" + std::to_string(client.reliable_pending_count()));
+    require(client.reliable_pending_count() == 0, "client clears pending after ACK for resend packet");
+}
+
+void test_integration_server_to_client_reliable_resend_and_cleanup()
+{
+    const auto t0 = Clock::now();
+    ConnectionServer server(0);
+    UdpSocket fake_client = UdpSocket::open();
+    const UdpEndpoint server_endpoint{"127.0.0.1", server.port()};
+
+    fake_client.send_to(make_connection_packet(PacketType::ConnectRequest, 1, 0), server_endpoint);
+    server.update(t0, std::chrono::milliseconds(200));
+    const auto accept = fake_client.receive_from(std::chrono::milliseconds(200));
+    require(accept.has_value(), "fake client receives ConnectAccept");
+    const auto accept_header = decode_packet_header(accept->bytes);
+    require(accept_header.has_value(), "ConnectAccept header decodes");
+    const auto session_id = accept_header->session_id;
+
+    const auto app_payload = bytes({4, 5, 6});
+    require(server.send_reliable(session_id, app_payload, t0 + std::chrono::milliseconds(10)),
+            "server queues reliable payload");
+    require(server.sessions().front().reliable_sender.pending_count() == 1, "server pending count is 1 after queue");
+
+    server.update(t0 + std::chrono::milliseconds(10));
+    const auto first_packet = fake_client.receive_from(std::chrono::milliseconds(200));
+    require(first_packet.has_value(), "fake client receives first server ReliableData");
+    const auto first_header = decode_packet_header(first_packet->bytes);
+    const auto first_decoded = decode_reliable_data_payload(
+        ByteView(first_packet->bytes.data() + kPacketHeaderSize, first_packet->bytes.size() - kPacketHeaderSize));
+    ReliableReceiver client_receiver;
+    const auto first_received = client_receiver.receive(first_decoded.messages[0]);
+    log_value("server_to_client first_seq=" + std::to_string(first_header->sequence) +
+              " message_id=" + std::to_string(first_received.message_id) +
+              " should_process=" + std::to_string(first_received.should_process) +
+              " pending_count=" + std::to_string(server.sessions().front().reliable_sender.pending_count()));
+    require(first_decoded.ok, "client decodes first server ReliableData");
+    require(first_received.should_process, "client processes first server reliable message");
+
+    server.update(t0 + std::chrono::milliseconds(249));
+    require(!fake_client.receive_from(std::chrono::milliseconds(50)).has_value(), "server does not resend before 250ms");
+
+    server.update(t0 + std::chrono::milliseconds(260));
+    const auto resend_packet = fake_client.receive_from(std::chrono::milliseconds(200));
+    require(resend_packet.has_value(), "fake client receives server resend after missing ACK");
+    const auto resend_header = decode_packet_header(resend_packet->bytes);
+    const auto resend_decoded = decode_reliable_data_payload(
+        ByteView(resend_packet->bytes.data() + kPacketHeaderSize, resend_packet->bytes.size() - kPacketHeaderSize));
+    const auto duplicate_received = client_receiver.receive(resend_decoded.messages[0]);
+    log_value("server_to_client resend_seq=" + std::to_string(resend_header->sequence) +
+              " duplicate_should_process=" + std::to_string(duplicate_received.should_process));
+    require(resend_header->sequence != first_header->sequence, "server resend uses a new packet sequence");
+    require(!duplicate_received.should_process, "client deduplicates resent server reliable message");
+
+    fake_client.send_to(make_connection_packet(PacketType::Heartbeat, 2, session_id, resend_header->sequence, 0),
+                        server_endpoint);
+    server.update(t0 + std::chrono::milliseconds(270), std::chrono::milliseconds(200));
+    log_value("server_to_client after_ack pending_count=" +
+              std::to_string(server.sessions().front().reliable_sender.pending_count()));
+    require(server.sessions().front().reliable_sender.pending_count() == 0,
+            "server clears pending after ACK for resend packet");
+}
+
 } // namespace
 
 int main()
 {
     // 不引入第三方测试框架，避免学习项目早期增加依赖和网络下载成本。
-    test_packet_header_round_trip_and_byte_order();
-    test_ack_tracker_sequence_allocation_and_comparison();
-    test_ack_tracker_empty_state_and_initial_ack();
-    test_ack_tracker_record_received_ordering();
-    test_ack_tracker_ack_bits_window();
-    test_ack_tracker_process_ack();
-    test_connection_packet_validation();
-    test_basic_packet_validation_rejections();
-    test_invalid_packet_does_not_update_ack_state();
-    test_client_connect_accept_and_timeout();
-    test_client_heartbeat_interval();
-    test_server_connect_request_and_duplicate();
-    test_server_heartbeat_and_disconnect_rules();
-    test_integration_acknowledged_heartbeats();
-    test_ping_pong_integration();
-    test_server_drops_invalid_packets();
+    run_test("packet header round trip and byte order", test_packet_header_round_trip_and_byte_order);
+    run_test("ack tracker sequence allocation and comparison", test_ack_tracker_sequence_allocation_and_comparison);
+    run_test("ack tracker empty state and initial ack", test_ack_tracker_empty_state_and_initial_ack);
+    run_test("ack tracker received ordering", test_ack_tracker_record_received_ordering);
+    run_test("ack tracker ack bits window", test_ack_tracker_ack_bits_window);
+    run_test("ack tracker process ack", test_ack_tracker_process_ack);
+    run_test("connection packet validation", test_connection_packet_validation);
+    run_test("basic packet validation rejections", test_basic_packet_validation_rejections);
+    run_test("invalid packet does not update ack state", test_invalid_packet_does_not_update_ack_state);
+    run_test("client connect accept and timeout", test_client_connect_accept_and_timeout);
+    run_test("client heartbeat interval", test_client_heartbeat_interval);
+    run_test("server connect request and duplicate", test_server_connect_request_and_duplicate);
+    run_test("server heartbeat and disconnect rules", test_server_heartbeat_and_disconnect_rules);
+    run_test("integration acknowledged heartbeats", test_integration_acknowledged_heartbeats);
+    run_test("ping pong integration", test_ping_pong_integration);
+    run_test("server drops invalid packets", test_server_drops_invalid_packets);
+    run_test("reliable sender message ids are independent", test_reliable_sender_message_ids_are_independent);
+    run_test("reliable sender pending delivery and packet selection",
+             test_reliable_sender_pending_delivery_and_packet_selection);
+    run_test("reliable data encoding decoding round trip", test_reliable_data_encoding_decoding_round_trip);
+    run_test("reliable data decode rejects malformed payloads", test_reliable_data_decode_rejects_malformed_payloads);
+    run_test("reliable sender max datagram and available space", test_reliable_sender_max_datagram_and_available_space);
+    run_test("reliable packet mapping and ack delivery", test_reliable_packet_mapping_and_ack_delivery);
+    run_test("reliable resend timing and delivery", test_reliable_resend_timing_and_delivery);
+    run_test("reliable receiver deduplicates per instance", test_reliable_receiver_deduplicates_per_instance);
+    run_test("integration client to server reliable resend and cleanup",
+             test_integration_client_to_server_reliable_resend_and_cleanup);
+    run_test("integration server to client reliable resend and cleanup",
+             test_integration_server_to_client_reliable_resend_and_cleanup);
 
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
