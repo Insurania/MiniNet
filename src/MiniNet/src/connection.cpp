@@ -31,7 +31,8 @@ std::vector<ServerSession>::iterator find_session_by_endpoint_and_id(std::vector
 bool is_session_control_packet(PacketType type)
 {
     return type == PacketType::Disconnect ||
-           type == PacketType::Heartbeat;
+           type == PacketType::Heartbeat ||
+           type == PacketType::ReliableData;
 }
 
 PacketValidationResult validate_any_packet(ByteView bytes)
@@ -98,6 +99,21 @@ const std::vector<SentPacketRecord>& ConnectionClient::sent_packets() const
     return ack_tracker_.sent_packets();
 }
 
+std::size_t ConnectionClient::reliable_pending_count() const
+{
+    return reliable_sender_.pending_count();
+}
+
+bool ConnectionClient::send_reliable(const std::vector<std::uint8_t>& payload, std::chrono::steady_clock::time_point now)
+{
+    // 这里只把 payload 放入可靠发送队列；真正发包由 update 统一执行，方便测试精确控制时间。
+    if (state_ != ConnectionState::Connected) {
+        return false;
+    }
+
+    return reliable_sender_.enqueue(payload, now);
+}
+
 ConnectionClientUpdateResult ConnectionClient::connect(std::chrono::steady_clock::time_point now)
 {
     // connect 只发起一次握手请求，不阻塞等待接受包。
@@ -151,12 +167,39 @@ ConnectionClientUpdateResult ConnectionClient::update(std::chrono::steady_clock:
                            header.session_id == session_id_) {
                     ack_tracker_.record_received(header.sequence);
                     ack_tracker_.process_ack(header.ack, header.ack_bits);
+                    reliable_sender_.process_acked_packets(ack_tracker_.sent_packets());
                     last_recv_time_ = now;
 
                     if (header.type == PacketType::Disconnect) {
                         state_ = ConnectionState::Disconnected;
                         session_id_ = 0;
                         result.state_changed = true;
+                    } else if (header.type == PacketType::ReliableData) {
+                        validation = validate_reliable_data_packet(datagram->bytes);
+                        result.reason = validation.reason;
+                        if (validation.accepted) {
+                            const auto payload_offset = kPacketHeaderSize;
+                            const auto payload_size = datagram->bytes.size() - payload_offset;
+                            const auto decoded = decode_reliable_data_payload(
+                                ByteView(datagram->bytes.data() + payload_offset, payload_size));
+                            if (decoded.ok) {
+                                for (const auto& message : decoded.messages) {
+                                    const auto received = reliable_receiver_.receive(message);
+                                    if (received.should_process) {
+                                        result.received_reliable_messages.push_back(received.payload);
+                                    }
+                                }
+                            }
+
+                            const auto sequence = ack_tracker_.allocate_send_sequence();
+                            const auto ack_state = ack_tracker_.make_ack_state();
+                            const auto heartbeat =
+                                make_connection_packet(PacketType::Heartbeat, sequence, session_id_, ack_state.ack, ack_state.ack_bits);
+                            socket_.send_to(heartbeat, server_);
+                            ack_tracker_.record_sent(sequence, now);
+                            last_send_time_ = now;
+                            result.sent = true;
+                        }
                     }
                 }
             }
@@ -175,6 +218,22 @@ ConnectionClientUpdateResult ConnectionClient::update(std::chrono::steady_clock:
         session_id_ = 0;
         result.state_changed = true;
         return result;
+    }
+
+    if (state_ == ConnectionState::Connected) {
+        reliable_sender_.process_acked_packets(ack_tracker_.sent_packets());
+        const auto available_bytes = kMaxDatagramSize - kPacketHeaderSize;
+        const auto messages = reliable_sender_.select_messages_for_packet(now, available_bytes);
+        if (!messages.empty()) {
+            const auto sequence = ack_tracker_.allocate_send_sequence();
+            const auto ack_state = ack_tracker_.make_ack_state();
+            const auto packet = make_reliable_data_packet(sequence, session_id_, ack_state.ack, ack_state.ack_bits, messages);
+            socket_.send_to(packet, server_);
+            ack_tracker_.record_sent(sequence, now);
+            reliable_sender_.mark_packet_sent(sequence, messages, now);
+            last_send_time_ = now;
+            result.sent = true;
+        }
     }
 
     if (state_ == ConnectionState::Connected && now - last_send_time_ >= config_.heartbeat_interval) {
@@ -245,6 +304,21 @@ const ServerSession* ConnectionServer::find_session(const UdpEndpoint& endpoint)
     return &*found;
 }
 
+bool ConnectionServer::send_reliable(std::uint32_t session_id,
+                                     const std::vector<std::uint8_t>& payload,
+                                     std::chrono::steady_clock::time_point now)
+{
+    // 按 session_id 找到目标客户端，让每个客户端维护自己独立的可靠发送状态。
+    const auto found = std::find_if(sessions_.begin(), sessions_.end(), [&](const ServerSession& session) {
+        return session.session_id == session_id;
+    });
+    if (found == sessions_.end()) {
+        return false;
+    }
+
+    return found->reliable_sender.enqueue(payload, now);
+}
+
 ConnectionServerUpdateResult ConnectionServer::update(std::chrono::steady_clock::time_point now,
                                                       std::chrono::milliseconds receive_timeout)
 {
@@ -288,6 +362,7 @@ ConnectionServerUpdateResult ConnectionServer::update(std::chrono::steady_clock:
                 if (found != sessions_.end()) {
                     found->ack_tracker.record_received(header.sequence);
                     found->ack_tracker.process_ack(header.ack, header.ack_bits);
+                    found->reliable_sender.process_acked_packets(found->ack_tracker.sent_packets());
                     found->last_recv_time = now;
 
                     if (header.type == PacketType::Disconnect) {
@@ -302,6 +377,35 @@ ConnectionServerUpdateResult ConnectionServer::update(std::chrono::steady_clock:
                         found->ack_tracker.record_sent(sequence, now);
                         found->last_send_time = now;
                         result.sent = true;
+                    } else if (header.type == PacketType::ReliableData) {
+                        validation = validate_reliable_data_packet(datagram->bytes);
+                        result.reason = validation.reason;
+                        if (validation.accepted) {
+                            const auto payload_offset = kPacketHeaderSize;
+                            const auto payload_size = datagram->bytes.size() - payload_offset;
+                            const auto decoded = decode_reliable_data_payload(
+                                ByteView(datagram->bytes.data() + payload_offset, payload_size));
+                            if (decoded.ok) {
+                                for (const auto& message : decoded.messages) {
+                                    const auto received = found->reliable_receiver.receive(message);
+                                    if (received.should_process) {
+                                        ReceivedReliableMessage item;
+                                        item.session_id = found->session_id;
+                                        item.payload = received.payload;
+                                        result.received_reliable_messages.push_back(item);
+                                    }
+                                }
+                            }
+
+                            const auto sequence = found->ack_tracker.allocate_send_sequence();
+                            const auto ack_state = found->ack_tracker.make_ack_state();
+                            const auto heartbeat =
+                                make_connection_packet(PacketType::Heartbeat, sequence, found->session_id, ack_state.ack, ack_state.ack_bits);
+                            socket_.send_to(heartbeat, datagram->sender);
+                            found->ack_tracker.record_sent(sequence, now);
+                            found->last_send_time = now;
+                            result.sent = true;
+                        }
                     }
                 }
             }
@@ -323,6 +427,20 @@ ConnectionServerUpdateResult ConnectionServer::update(std::chrono::steady_clock:
     sessions_.erase(write, sessions_.end());
 
     for (auto& session : sessions_) {
+        session.reliable_sender.process_acked_packets(session.ack_tracker.sent_packets());
+        const auto available_bytes = kMaxDatagramSize - kPacketHeaderSize;
+        const auto messages = session.reliable_sender.select_messages_for_packet(now, available_bytes);
+        if (!messages.empty()) {
+            const auto sequence = session.ack_tracker.allocate_send_sequence();
+            const auto ack_state = session.ack_tracker.make_ack_state();
+            const auto packet = make_reliable_data_packet(sequence, session.session_id, ack_state.ack, ack_state.ack_bits, messages);
+            socket_.send_to(packet, session.endpoint);
+            session.ack_tracker.record_sent(sequence, now);
+            session.reliable_sender.mark_packet_sent(sequence, messages, now);
+            session.last_send_time = now;
+            result.sent = true;
+        }
+
         if (now - session.last_send_time >= config_.heartbeat_interval) {
             const auto sequence = session.ack_tracker.allocate_send_sequence();
             const auto ack_state = session.ack_tracker.make_ack_state();

@@ -57,7 +57,8 @@ bool is_known_packet_type(std::uint8_t raw_type)
            raw_type == static_cast<std::uint8_t>(PacketType::ConnectRequest) ||
            raw_type == static_cast<std::uint8_t>(PacketType::ConnectAccept) ||
            raw_type == static_cast<std::uint8_t>(PacketType::Disconnect) ||
-           raw_type == static_cast<std::uint8_t>(PacketType::Heartbeat);
+           raw_type == static_cast<std::uint8_t>(PacketType::Heartbeat) ||
+           raw_type == static_cast<std::uint8_t>(PacketType::ReliableData);
 }
 
 std::array<std::uint8_t, kPacketHeaderSize> encode_packet_header(const PacketHeader& header)
@@ -164,6 +165,11 @@ PacketValidationResult validate_heartbeat_packet(ByteView bytes)
     return validate_packet_type(bytes, PacketType::Heartbeat);
 }
 
+PacketValidationResult validate_reliable_data_packet(ByteView bytes)
+{
+    return validate_packet_type(bytes, PacketType::ReliableData);
+}
+
 PacketValidationResult validate_disconnect_packet(ByteView bytes)
 {
     return validate_packet_type(bytes, PacketType::Disconnect);
@@ -184,6 +190,8 @@ const char* to_string(PacketType type)
         return "Disconnect";
     case PacketType::Heartbeat:
         return "Heartbeat";
+    case PacketType::ReliableData:
+        return "ReliableData";
     }
 
     return "Unknown";
