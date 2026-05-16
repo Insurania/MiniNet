@@ -22,7 +22,15 @@ Do not add unrelated test frameworks unless the repository already uses none and
 
 Test output rules:
 - Generated tests should print readable progress in the terminal.
-- Each test group should print when it starts and when it passes.
+- Each test group should print when it starts and when it passes, using this format:
+  [RUN] test name
+    key=value
+  [PASS] test name
+- When a test fails, prefer this format when practical:
+  [FAIL] test name
+    expected=
+    actual=
+    context=
 - Important computed values should be printed when useful for learning, such as sequence, ack, ack_bits, session_id, timeout result, and packet type.
 - Avoid noisy per-line dumps; prefer concise, meaningful progress logs.
 - Do not leave the user with only one final success line.

@@ -23,5 +23,13 @@ issue-8-reliable-unordered-messages.md
 - Implementation Order
 - Test Mapping
 - Non-goals Preserved
+- Implementation Notes
 
-这些文档是学习材料，不要求和最终实现完全一字不差；如果实现过程中方案有调整，可以在 PR 或后续复盘中记录原因。
+`Implementation Notes` 是实现后的复盘区，用来记录：
+
+- 哪些地方和原计划一致。
+- 哪些地方在实现时调整了。
+- 为什么调整。
+- 后续还想继续学习或改进什么。
+
+这些文档是学习材料，不要求和最终实现完全一字不差；重要的是把“为什么计划这样写”和“为什么实现时改变”记录下来。

@@ -12,6 +12,16 @@ GitHub issue 不再一律使用同样重的流程。开始 issue 前，Codex 应
 - `normal`：边界清楚的普通功能。使用精简四 agent 工作流。
 - `large`：协议设计变化、复杂状态机、跨模块重构或高风险改动。使用完整四 agent 工作流。
 
+每次开始 issue 时，Codex 应先输出这个判断块：
+
+```text
+Issue #N 规模判断：small / normal / large
+原因：
+采用流程：
+是否需要 issue_reviewer：
+是否需要保存 architecture plan：
+```
+
 ### small 轻量流程
 
 适用场景：文档、规则、模板、注释、小型配置、README 更新。
@@ -42,6 +52,21 @@ GitHub issue 不再一律使用同样重的流程。开始 issue 前，Codex 应
 流程同标准四 agent，但允许更详细的方案、风险分析和测试矩阵。
 
 除非你明确要求跳过某一步，否则 `normal` 和 `large` issue 不要直接进入实现。
+
+## 什么时候可以跳过 issue_reviewer
+
+以下情况可以跳过 `issue_reviewer`：
+
+- 只改文档、注释、模板、README 或 agent 配置。
+- 不改变 C++ 行为、不改变协议格式、不影响测试期望。
+- issue 或请求已经非常明确，且没有 scope creep 风险。
+
+以下情况不要跳过 `issue_reviewer`：
+
+- 新增或修改协议能力。
+- 修改连接、ACK、重传、超时、丢包模拟等状态机。
+- 验收标准不够具体。
+- 你明确希望练习 issue review。
 
 ## Step 1: issue_reviewer
 
@@ -135,6 +160,7 @@ gh issue edit N --repo Insurania/MiniNet --body-file docs/tmp/issue-N-body.md
 - `architecture_planner` 必须把最终架构方案保存到 `docs/architecture-plans/`。
 - 文件命名使用 `issue-N-short-title.md`，例如 `issue-8-reliable-unordered-messages.md`。
 - 保存的文档应包含与最终回复相同的主要章节，方便你后续学习和复盘。
+- 保存的文档末尾必须预留 `Implementation Notes`，用于实现后记录计划与实际实现的差异。
 - `architecture_planner` 只允许写这个架构方案文档，不应该修改生产代码、测试、构建文件或 README。
 
 人工确认点：
@@ -198,7 +224,23 @@ gh issue edit N --repo Insurania/MiniNet --body-file docs/tmp/issue-N-body.md
 
 测试输出要求：
 
-- 每个测试组应输出开始和通过信息。
+- 每个测试组应输出开始和通过信息，统一格式为：
+
+```text
+[RUN] test name
+  key=value
+[PASS] test name
+```
+
+- 如果测试失败，优先输出：
+
+```text
+[FAIL] test name
+  expected=
+  actual=
+  context=
+```
+
 - 对学习有帮助的关键值应输出，例如 `sequence`、`ack`、`ack_bits`、`session_id`、packet type、timeout 结果。
 - 输出要简洁，避免大量无意义逐行 dump。
 - 运行测试时优先使用能显示 stdout 的命令，例如：
@@ -253,3 +295,24 @@ Codex 应先说明本次 issue 属于 `small`、`normal` 还是 `large`，并采
 - 测试通过。
 - PR 描述包含测试结果和未实现内容。
 - 如果该 PR 完成 issue，应在 PR 描述里写 `Closes #issue_number`。
+
+## PR 合并后检查
+
+PR 合并后，Codex 应优先使用保守命令更新本地状态：
+
+```powershell
+git switch main
+git pull --ff-only origin main
+git branch --merged
+```
+
+检查项：
+
+- [ ] 本地 `main` 已更新到远端最新。
+- [ ] 已确认 PR 对应 issue 被关闭。
+- [ ] 已删除确认合并且不再需要的本地 feature 分支。
+- [ ] 如 GitHub 没自动删除远端 feature 分支，再确认是否需要删除。
+- [ ] 如功能状态变化影响 README / roadmap，单独更新文档。
+- [ ] 如有值得记录的设计偏差，补充到对应 `docs/architecture-plans/issue-N-*.md` 的 `Implementation Notes`。
+
+如果 `git pull --ff-only` 失败，不要强行 reset；先说明远端和本地发生了分叉，再决定是否 rebase。

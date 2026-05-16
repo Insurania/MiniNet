@@ -157,6 +157,7 @@ Review 重点看：
 
 - 先给 issue，再让 AI 实现。
 - 开始 issue 前先判断规模：`small`、`normal`、`large`。
+- 开始 issue 时先明确输出：规模判断、原因、采用流程、是否需要 `issue_reviewer`、是否需要保存 architecture plan。
 - `small` 修改使用轻量流程，不启动完整 subagent。
 - `normal` 功能 issue 使用精简四 agent 工作流：`issue_reviewer -> architecture_planner -> implementation_worker -> test_worker`。
 - `large` 或高风险 issue 使用完整四 agent 工作流。
@@ -173,6 +174,13 @@ Token 使用规则：
 - 只有涉及协议设计变化、跨模块重构、复杂状态机或你明确要求时，才使用完整工作流。
 - 每个 agent 输出优先给结论、修改点、风险和测试结果，避免重复项目背景。
 - `architecture_planner` 的输出必须保存到 `docs/architecture-plans/`，方便学习和复盘。
+- `architecture_planner` 保存的方案必须预留 `Implementation Notes`，实现后记录计划和实际代码的差异。
+
+跳过 `issue_reviewer` 的条件：
+
+- 只改文档、注释、模板、README 或 agent 配置。
+- 不改变 C++ 行为、不改变协议格式、不影响测试期望。
+- 请求本身已经足够明确，且没有扩大范围风险。
 
 AI 可以帮助：
 
@@ -225,3 +233,17 @@ test: cover malformed packet handling
 - 下一个 issue 应该如何拆得更好。
 
 这部分可以写在 issue comment、PR comment，或后续单独整理到文档中。
+
+推荐 GitHub issue / PR 复盘格式：
+
+```md
+## 学习复盘
+
+学到的网络概念：
+AI 帮上忙的地方：
+AI 需要人工纠正的地方：
+计划和实现的差异：
+下个 issue 可以写得更好的地方：
+```
+
+协议功能完成后，也应更新 `docs/learning-index.md`，把 issue、PR、架构方案、关键代码和关键测试串起来。

@@ -28,6 +28,12 @@ Plan persistence rule:
 - Use the filename format issue-N-short-title.md, for example docs/architecture-plans/issue-8-reliable-unordered-messages.md.
 - If the issue number is unknown, use yyyy-mm-dd-short-title.md.
 - The saved document must contain the same sections as your final response.
+- The saved document must end with an "Implementation Notes" section.
+- Leave "Implementation Notes" as a short checklist for the parent agent or user to fill after implementation:
+  - What matched the plan.
+  - What changed during implementation.
+  - Why it changed.
+  - Follow-up learning notes.
 - Keep the document focused and useful for later study; avoid copying unrelated repository history.
 - In your final response, include the path of the saved plan document.
 
@@ -77,4 +83,8 @@ Map each acceptance criterion to one or more tests.
 ## Non-goals Preserved
 
 Confirm which features must not be implemented.
+
+## Implementation Notes
+
+Leave a short post-implementation checklist for later study.
 """
