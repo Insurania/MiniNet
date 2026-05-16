@@ -3,6 +3,7 @@
 #include "mininet/ack_tracker.hpp"
 #include "mininet/packet.hpp"
 #include "mininet/reliable_message.hpp"
+#include "mininet/snapshot.hpp"
 #include "mininet/udp_socket.hpp"
 
 #include <chrono>
@@ -82,6 +83,9 @@ struct ConnectionClientUpdateResult {
 
     // 本轮第一次处理的可靠无序消息 payload；重复 message_id 会被去重，不会放进这里。
     std::vector<std::vector<std::uint8_t>> received_reliable_messages;
+
+    // 本轮成功解码的 Snapshot；Snapshot 是不可靠状态同步，不进入 reliable message 列表。
+    std::optional<Snapshot> received_snapshot;
 };
 
 // 服务端 update 的结果，用于测试和日志观察本轮状态机做了什么。
@@ -139,6 +143,9 @@ public:
     // 返回仍在等待 packet ACK 的可靠消息数量，主要用于测试确认 pending 是否被清理。
     std::size_t reliable_pending_count() const;
 
+    // 返回客户端本地 SnapshotBuffer；上层可用它读取最近的服务端状态。
+    const SnapshotBuffer& snapshot_buffer() const;
+
     // 发送 ConnectRequest 并进入 Connecting；ConnectRequest 的 session_id 必须为 0。
     ConnectionClientUpdateResult connect(std::chrono::steady_clock::time_point now);
 
@@ -182,6 +189,9 @@ private:
 
     // 客户端可靠消息接收去重器；避免服务端重传导致同一 message_id 重复交给上层。
     ReliableReceiver reliable_receiver_;
+
+    // 客户端收到的服务器 Snapshot 缓存；按 snapshot_id 升序保存最近状态。
+    SnapshotBuffer snapshot_buffer_;
 };
 
 // UDP 虚拟连接服务端。调用方显式调用 update 推进会话维护。
@@ -209,6 +219,11 @@ public:
     // 给指定 session 排队一条可靠无序消息；真正发包发生在后续 update 中。
     bool send_reliable(std::uint32_t session_id,
                        const std::vector<std::uint8_t>& payload,
+                       std::chrono::steady_clock::time_point now);
+
+    // 立即向指定 session 发送一次 Snapshot；不排队、不重传、不进入 ReliableSender。
+    bool send_snapshot(std::uint32_t session_id,
+                       const Snapshot& snapshot,
                        std::chrono::steady_clock::time_point now);
 
 private:

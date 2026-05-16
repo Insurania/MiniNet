@@ -3,9 +3,11 @@
 #include "mininet/packet.hpp"
 #include "mininet/ping.hpp"
 #include "mininet/reliable_message.hpp"
+#include "mininet/snapshot.hpp"
 #include "mininet/udp_socket.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -60,6 +62,86 @@ std::string byte_list(const std::vector<std::uint8_t>& values)
             text += ",";
         }
         text += std::to_string(values[index]);
+    }
+    return text;
+}
+
+const char* to_string(SnapshotInsertStatus status)
+{
+    switch (status) {
+    case SnapshotInsertStatus::Inserted:
+        return "Inserted";
+    case SnapshotInsertStatus::Duplicate:
+        return "Duplicate";
+    case SnapshotInsertStatus::TooOld:
+        return "TooOld";
+    case SnapshotInsertStatus::InsertedAndEvictedOldest:
+        return "InsertedAndEvictedOldest";
+    }
+
+    return "Unknown";
+}
+
+Snapshot make_test_snapshot(SnapshotId snapshot_id)
+{
+    Snapshot snapshot;
+    snapshot.snapshot_id = snapshot_id;
+    snapshot.server_tick = snapshot_id * 10;
+    snapshot.server_time_ms = 1000 + snapshot_id * 50;
+    snapshot.entities.push_back(EntityState{101, Vec2f{1.5f + static_cast<float>(snapshot_id), -2.0f},
+                                            Vec2f{0.25f, 0.5f}});
+    snapshot.entities.push_back(EntityState{202, Vec2f{-4.0f, 8.0f + static_cast<float>(snapshot_id)},
+                                            Vec2f{-0.5f, 1.25f}});
+    return snapshot;
+}
+
+Snapshot make_snapshot_with_entity_count(std::size_t count)
+{
+    Snapshot snapshot;
+    snapshot.snapshot_id = 900;
+    snapshot.server_tick = 901;
+    snapshot.server_time_ms = 902;
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto value = static_cast<float>(index);
+        snapshot.entities.push_back(
+            EntityState{static_cast<EntityId>(1000 + index), Vec2f{value, value + 1.0f}, Vec2f{0.0f, 0.0f}});
+    }
+    return snapshot;
+}
+
+bool nearly_equal(float left, float right)
+{
+    return std::fabs(left - right) < 0.0001f;
+}
+
+bool snapshots_equal(const Snapshot& left, const Snapshot& right)
+{
+    if (left.snapshot_id != right.snapshot_id || left.server_tick != right.server_tick ||
+        left.server_time_ms != right.server_time_ms || left.entities.size() != right.entities.size()) {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < left.entities.size(); ++index) {
+        const auto& a = left.entities[index];
+        const auto& b = right.entities[index];
+        if (a.entity_id != b.entity_id || !nearly_equal(a.position.x, b.position.x) ||
+            !nearly_equal(a.position.y, b.position.y) || !nearly_equal(a.velocity.x, b.velocity.x) ||
+            !nearly_equal(a.velocity.y, b.velocity.y)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+std::string snapshot_ids(const SnapshotBuffer& buffer)
+{
+    std::string text;
+    for (std::size_t index = 0; index < buffer.snapshots().size(); ++index) {
+        if (index != 0) {
+            text += ",";
+        }
+        text += std::to_string(buffer.snapshots()[index].snapshot_id);
     }
     return text;
 }
@@ -873,6 +955,342 @@ void test_integration_server_to_client_reliable_resend_and_cleanup()
             "server clears pending after ACK for resend packet");
 }
 
+void test_snapshot_payload_round_trip()
+{
+    const auto snapshot = make_test_snapshot(42);
+    const auto encoded = encode_snapshot_payload(snapshot);
+    require(encoded.has_value(), "snapshot payload encodes");
+
+    const auto decoded = encoded.has_value() ? decode_snapshot_payload(*encoded) : SnapshotDecodeResult{};
+    log_value("snapshot_id=" + std::to_string(snapshot.snapshot_id) +
+              " entity_count=" + std::to_string(snapshot.entities.size()) +
+              " encoded_size=" + std::to_string(encoded.has_value() ? encoded->size() : 0));
+    require(decoded.ok, "encoded snapshot decodes");
+    require(decoded.ok && snapshots_equal(decoded.snapshot, snapshot), "decoded snapshot equals source snapshot");
+}
+
+void test_snapshot_payload_decode_rejects_malformed_inputs()
+{
+    const auto snapshot = make_test_snapshot(7);
+    const auto encoded = encode_snapshot_payload(snapshot);
+    require(encoded.has_value(), "valid snapshot encodes before malformed cases");
+
+    const std::vector<std::uint8_t> short_payload(19, 0);
+    auto too_many_entities = std::vector<std::uint8_t>(20, 0);
+    too_many_entities[19] = static_cast<std::uint8_t>(kMaxEntitiesPerSnapshot + 1);
+
+    auto missing_bytes = encoded.value_or(std::vector<std::uint8_t>{});
+    if (!missing_bytes.empty()) {
+        missing_bytes.pop_back();
+    }
+
+    auto extra_bytes = encoded.value_or(std::vector<std::uint8_t>{});
+    extra_bytes.push_back(0xAA);
+
+    const auto short_result = decode_snapshot_payload(short_payload);
+    const auto too_many_result = decode_snapshot_payload(too_many_entities);
+    const auto missing_result = decode_snapshot_payload(missing_bytes);
+    const auto extra_result = decode_snapshot_payload(extra_bytes);
+
+    log_value("short_payload_ok=" + std::to_string(short_result.ok) +
+              " bytes=" + std::to_string(short_payload.size()));
+    log_value("too_many_entities_ok=" + std::to_string(too_many_result.ok) +
+              " entity_count=" + std::to_string(kMaxEntitiesPerSnapshot + 1));
+    log_value("missing_bytes_ok=" + std::to_string(missing_result.ok) +
+              " bytes=" + std::to_string(missing_bytes.size()));
+    log_value("extra_bytes_ok=" + std::to_string(extra_result.ok) +
+              " bytes=" + std::to_string(extra_bytes.size()));
+
+    require(!short_result.ok, "short snapshot payload fails");
+    require(!too_many_result.ok, "entity count over max fails");
+    require(!missing_result.ok, "insufficient entity bytes fail");
+    require(!extra_result.ok, "extra trailing bytes fail");
+}
+
+void test_snapshot_encode_rejects_too_many_entities()
+{
+    const auto too_large = make_snapshot_with_entity_count(kMaxEntitiesPerSnapshot + 1);
+    const auto payload = encode_snapshot_payload(too_large);
+    const auto packet = make_snapshot_packet(1, 9, 0, 0, too_large);
+    log_value("entity_count=" + std::to_string(too_large.entities.size()) +
+              " payload_encoded=" + std::to_string(payload.has_value()) +
+              " packet_encoded=" + std::to_string(packet.has_value()));
+    require(!payload.has_value(), "payload encode rejects 33 entities");
+    require(!packet.has_value(), "packet encode rejects 33 entities");
+}
+
+void test_snapshot_buffer_insert_duplicate_and_too_old()
+{
+    SnapshotBuffer buffer;
+    const auto inserted = buffer.insert(make_test_snapshot(10));
+    const auto duplicate = buffer.insert(make_test_snapshot(10));
+    const auto too_old = buffer.insert(make_test_snapshot(9));
+
+    log_value("insert_status=" + std::string(to_string(inserted)) +
+              " duplicate_status=" + std::string(to_string(duplicate)) +
+              " too_old_status=" + std::string(to_string(too_old)) +
+              " buffer_ids=" + snapshot_ids(buffer));
+    require(inserted == SnapshotInsertStatus::Inserted, "single snapshot inserts");
+    require(duplicate == SnapshotInsertStatus::Duplicate, "duplicate snapshot_id is rejected");
+    require(too_old == SnapshotInsertStatus::TooOld, "older than oldest snapshot_id is rejected");
+    require(buffer.size() == 1, "duplicate and too-old snapshots do not grow buffer");
+}
+
+void test_snapshot_buffer_out_of_order_sorting_and_capacity()
+{
+    SnapshotBuffer out_of_order;
+    out_of_order.insert(make_test_snapshot(10));
+    out_of_order.insert(make_test_snapshot(30));
+    const auto middle = out_of_order.insert(make_test_snapshot(20));
+    log_value("out_of_order_status=" + std::string(to_string(middle)) +
+              " buffer_ids=" + snapshot_ids(out_of_order));
+    require(middle == SnapshotInsertStatus::Inserted, "out-of-order newer snapshot inserts");
+    require(out_of_order.snapshots().size() == 3, "out-of-order buffer has three snapshots");
+    require(out_of_order.snapshots()[0].snapshot_id == 10 && out_of_order.snapshots()[1].snapshot_id == 20 &&
+                out_of_order.snapshots()[2].snapshot_id == 30,
+            "out-of-order insert keeps ascending snapshot_id order");
+
+    SnapshotBuffer capped;
+    SnapshotInsertStatus last_status = SnapshotInsertStatus::Inserted;
+    for (SnapshotId id = 1; id <= kSnapshotBufferCapacity + 1; ++id) {
+        last_status = capped.insert(make_test_snapshot(id));
+    }
+    log_value("capacity=" + std::to_string(kSnapshotBufferCapacity) +
+              " final_size=" + std::to_string(capped.size()) +
+              " last_status=" + std::string(to_string(last_status)) +
+              " buffer_ids=" + snapshot_ids(capped));
+    require(last_status == SnapshotInsertStatus::InsertedAndEvictedOldest,
+            "inserting beyond capacity evicts oldest");
+    require(capped.size() == kSnapshotBufferCapacity, "buffer remains capped at capacity");
+    require(capped.snapshots().front().snapshot_id == 2, "oldest snapshot was evicted");
+    require(capped.snapshots().back().snapshot_id == kSnapshotBufferCapacity + 1, "newest snapshot remains");
+}
+
+void test_snapshot_interpolation_positions_and_missing_entity()
+{
+    Snapshot older;
+    older.snapshot_id = 1;
+    older.entities.push_back(EntityState{5, Vec2f{10.0f, -10.0f}, Vec2f{}});
+    older.entities.push_back(EntityState{6, Vec2f{1.0f, 1.0f}, Vec2f{}});
+
+    Snapshot newer;
+    newer.snapshot_id = 2;
+    newer.entities.push_back(EntityState{5, Vec2f{20.0f, 30.0f}, Vec2f{}});
+
+    const auto alpha_zero = interpolate_entity_position(older, newer, 5, 0.0f);
+    const auto alpha_half = interpolate_entity_position(older, newer, 5, 0.5f);
+    const auto alpha_one = interpolate_entity_position(older, newer, 5, 1.0f);
+    const auto missing = interpolate_entity_position(older, newer, 6, 0.5f);
+
+    log_value("entity_id=5 alpha0=(" + std::to_string(alpha_zero ? alpha_zero->x : 0.0f) + "," +
+              std::to_string(alpha_zero ? alpha_zero->y : 0.0f) + ") alpha05=(" +
+              std::to_string(alpha_half ? alpha_half->x : 0.0f) + "," +
+              std::to_string(alpha_half ? alpha_half->y : 0.0f) + ") alpha1=(" +
+              std::to_string(alpha_one ? alpha_one->x : 0.0f) + "," +
+              std::to_string(alpha_one ? alpha_one->y : 0.0f) + ")");
+    log_value("missing_entity_result=" + std::to_string(missing.has_value()));
+    require(alpha_zero && nearly_equal(alpha_zero->x, 10.0f) && nearly_equal(alpha_zero->y, -10.0f),
+            "alpha=0 returns older position");
+    require(alpha_half && nearly_equal(alpha_half->x, 15.0f) && nearly_equal(alpha_half->y, 10.0f),
+            "alpha=0.5 linearly interpolates position");
+    require(alpha_one && nearly_equal(alpha_one->x, 20.0f) && nearly_equal(alpha_one->y, 30.0f),
+            "alpha=1 returns newer position");
+    require(!missing.has_value(), "missing entity in either snapshot fails");
+}
+
+void test_snapshot_rate_helpers()
+{
+    const auto update_interval = snapshot_update_interval_60hz();
+    const auto send_interval = snapshot_send_interval_20hz();
+    const auto update_before = update_interval - std::chrono::nanoseconds(1);
+    const auto send_before = send_interval - std::chrono::nanoseconds(1);
+
+    log_value("update_interval_ns=" + std::to_string(update_interval.count()) +
+              " send_interval_ns=" + std::to_string(send_interval.count()));
+    log_value("update_before=" + std::to_string(should_run_snapshot_update(update_before)) +
+              " update_equal=" + std::to_string(should_run_snapshot_update(update_interval)) +
+              " update_after=" + std::to_string(should_run_snapshot_update(update_interval + std::chrono::nanoseconds(1))));
+    log_value("send_before=" + std::to_string(should_send_snapshot(send_before)) +
+              " send_equal=" + std::to_string(should_send_snapshot(send_interval)) +
+              " send_after=" + std::to_string(should_send_snapshot(send_interval + std::chrono::nanoseconds(1))));
+
+    require(!should_run_snapshot_update(update_before), "elapsed below 60Hz interval does not run update");
+    require(should_run_snapshot_update(update_interval), "elapsed equal to 60Hz interval runs update");
+    require(should_run_snapshot_update(update_interval + std::chrono::nanoseconds(1)),
+            "elapsed above 60Hz interval runs update");
+    require(!should_send_snapshot(send_before), "elapsed below 20Hz interval does not send snapshot");
+    require(should_send_snapshot(send_interval), "elapsed equal to 20Hz interval sends snapshot");
+    require(should_send_snapshot(send_interval + std::chrono::nanoseconds(1)),
+            "elapsed above 20Hz interval sends snapshot");
+}
+
+void test_snapshot_packet_type_validation_and_string()
+{
+    const auto snapshot = make_test_snapshot(55);
+    const auto packet = make_snapshot_packet(12, 99, 3, 4, snapshot);
+    require(packet.has_value(), "snapshot packet encodes");
+
+    const auto validation = packet.has_value() ? validate_snapshot_packet(*packet) : PacketValidationResult{};
+    const auto heartbeat = make_connection_packet(PacketType::Heartbeat, 13, 99);
+    const auto heartbeat_validation = validate_snapshot_packet(heartbeat);
+    log_value("packet_type=" + std::to_string(static_cast<int>(PacketType::Snapshot)) +
+              " known=" + std::to_string(is_known_packet_type(static_cast<std::uint8_t>(PacketType::Snapshot))) +
+              " validation=" + std::string(to_string(validation.reason)) +
+              " heartbeat_validation=" + std::string(to_string(heartbeat_validation.reason)));
+    require(is_known_packet_type(static_cast<std::uint8_t>(PacketType::Snapshot)),
+            "PacketType::Snapshot is known");
+    require(validation.accepted, "validate_snapshot_packet accepts Snapshot packet");
+    require(!heartbeat_validation.accepted && heartbeat_validation.reason == PacketRejectReason::UnexpectedType,
+            "validate_snapshot_packet rejects Heartbeat");
+    require(std::string(to_string(PacketType::Snapshot)) == "Snapshot", "PacketType::Snapshot string is Snapshot");
+}
+
+void test_snapshot_send_does_not_enter_reliable_queue_or_resend()
+{
+    const auto t0 = Clock::now();
+    ConnectionServer server(0);
+    UdpSocket fake_client = UdpSocket::open();
+    const UdpEndpoint server_endpoint{"127.0.0.1", server.port()};
+
+    fake_client.send_to(make_connection_packet(PacketType::ConnectRequest, 1, 0), server_endpoint);
+    server.update(t0, std::chrono::milliseconds(200));
+    const auto accept = fake_client.receive_from(std::chrono::milliseconds(200));
+    require(accept.has_value(), "fake client receives ConnectAccept");
+    const auto accept_header = accept.has_value() ? decode_packet_header(accept->bytes) : std::nullopt;
+    require(accept_header.has_value(), "ConnectAccept decodes");
+    const auto session_id = accept_header.has_value() ? accept_header->session_id : 0;
+
+    const auto sent = server.send_snapshot(session_id, make_test_snapshot(70), t0 + std::chrono::milliseconds(10));
+    const auto pending_after_snapshot = server.sessions().empty() ? 999u : server.sessions().front().reliable_sender.pending_count();
+    const auto first_packet = fake_client.receive_from(std::chrono::milliseconds(200));
+    const auto first_header = first_packet.has_value() ? decode_packet_header(first_packet->bytes) : std::nullopt;
+
+    server.update(t0 + std::chrono::milliseconds(270), std::chrono::milliseconds(0));
+    const auto maybe_resend = fake_client.receive_from(std::chrono::milliseconds(50));
+
+    log_value("session_id=" + std::to_string(session_id) +
+              " send_snapshot=" + std::to_string(sent) +
+              " pending_count=" + std::to_string(pending_after_snapshot));
+    log_value("packet_sequence=" + std::to_string(first_header ? first_header->sequence : 0) +
+              " packet_type=" + std::string(first_header ? to_string(first_header->type) : "None") +
+              " resent=" + std::to_string(maybe_resend.has_value()));
+    require(sent, "server sends Snapshot once");
+    require(pending_after_snapshot == 0, "Snapshot does not enter reliable message queue");
+    require(first_header && first_header->type == PacketType::Snapshot, "fake client receives Snapshot packet");
+    require(!maybe_resend.has_value(), "Snapshot loss does not trigger automatic retransmit");
+}
+
+void test_snapshot_integration_client_receives_and_caches()
+{
+    const auto t0 = Clock::now();
+    ConnectionServer server(0);
+    ConnectionClient client({"127.0.0.1", server.port()});
+
+    client.connect(t0);
+    server.update(t0, std::chrono::milliseconds(200));
+    client.update(t0 + std::chrono::milliseconds(1), std::chrono::milliseconds(200));
+    require(client.state() == ConnectionState::Connected, "client connects before Snapshot");
+    const auto session_id = client.session_id();
+
+    const auto snapshot = make_test_snapshot(80);
+    const auto sent = server.send_snapshot(session_id, snapshot, t0 + std::chrono::milliseconds(10));
+    const auto received = client.update(t0 + std::chrono::milliseconds(20), std::chrono::milliseconds(200));
+
+    log_value("session_id=" + std::to_string(session_id) +
+              " send_snapshot=" + std::to_string(sent) +
+              " received_snapshot=" + std::to_string(received.received_snapshot.has_value()) +
+              " reliable_messages=" + std::to_string(received.received_reliable_messages.size()));
+    log_value("snapshot_id=" +
+              std::to_string(received.received_snapshot ? received.received_snapshot->snapshot_id : 0) +
+              " buffer_ids=" + snapshot_ids(client.snapshot_buffer()));
+    require(sent, "server send_snapshot succeeds on connected session");
+    require(received.received_snapshot.has_value(), "client update reports received Snapshot");
+    require(received.received_reliable_messages.empty(), "Snapshot is not delivered as reliable message");
+    require(client.snapshot_buffer().size() == 1, "client caches received Snapshot");
+    require(client.snapshot_buffer().snapshots().front().snapshot_id == snapshot.snapshot_id,
+            "client cache stores expected snapshot_id");
+}
+
+void test_snapshot_integration_unconnected_and_wrong_session_are_dropped()
+{
+    const auto t0 = Clock::now();
+    UdpSocket fake_server = UdpSocket::bind(0);
+    const UdpEndpoint server_endpoint{"127.0.0.1", fake_server.local_port()};
+
+    ConnectionClient connecting_client(server_endpoint);
+    connecting_client.connect(t0);
+    const auto unconnected_request = fake_server.receive_from(std::chrono::milliseconds(200));
+    require(unconnected_request.has_value(), "fake server receives ConnectRequest from unconnected client");
+    const auto unconnected_packet = make_snapshot_packet(1, 77, 0, 0, make_test_snapshot(91));
+    require(unconnected_packet.has_value(), "unconnected Snapshot packet encodes");
+    if (unconnected_packet.has_value() && unconnected_request.has_value()) {
+        fake_server.send_to(*unconnected_packet, unconnected_request->sender);
+    }
+    connecting_client.update(t0 + std::chrono::milliseconds(1), std::chrono::milliseconds(200));
+    log_value("connecting_buffer_size=" + std::to_string(connecting_client.snapshot_buffer().size()));
+    require(connecting_client.snapshot_buffer().size() == 0, "client without established virtual connection drops Snapshot");
+
+    ConnectionClient client(server_endpoint);
+    client.connect(t0);
+    const auto request = fake_server.receive_from(std::chrono::milliseconds(200));
+    require(request.has_value(), "fake server receives ConnectRequest");
+    if (request.has_value()) {
+        fake_server.send_to(make_connection_packet(PacketType::ConnectAccept, 2, 77), request->sender);
+    }
+    client.update(t0 + std::chrono::milliseconds(1), std::chrono::milliseconds(200));
+    require(client.state() == ConnectionState::Connected, "client connects to fake server");
+
+    const auto wrong_session_packet = make_snapshot_packet(3, 78, 0, 0, make_test_snapshot(92));
+    require(wrong_session_packet.has_value(), "wrong-session Snapshot packet encodes");
+    if (wrong_session_packet.has_value()) {
+        fake_server.send_to(*wrong_session_packet, {"127.0.0.1", client.local_port()});
+    }
+    const auto wrong_session_result = client.update(t0 + std::chrono::milliseconds(2), std::chrono::milliseconds(200));
+    log_value("expected_session_id=77 wrong_session_id=78 received_snapshot=" +
+              std::to_string(wrong_session_result.received_snapshot.has_value()) +
+              " buffer_size=" + std::to_string(client.snapshot_buffer().size()));
+    require(!wrong_session_result.received_snapshot.has_value(), "wrong session_id Snapshot is not reported");
+    require(client.snapshot_buffer().size() == 0, "wrong session_id Snapshot is not cached");
+}
+
+void test_snapshot_integration_client_buffer_keeps_order_after_out_of_order_arrival()
+{
+    const auto t0 = Clock::now();
+    UdpSocket fake_server = UdpSocket::bind(0);
+    const UdpEndpoint server_endpoint{"127.0.0.1", fake_server.local_port()};
+    ConnectionClient client(server_endpoint);
+
+    client.connect(t0);
+    const auto request = fake_server.receive_from(std::chrono::milliseconds(200));
+    require(request.has_value(), "fake server receives ConnectRequest");
+    if (request.has_value()) {
+        fake_server.send_to(make_connection_packet(PacketType::ConnectAccept, 10, 123), request->sender);
+    }
+    client.update(t0 + std::chrono::milliseconds(1), std::chrono::milliseconds(200));
+    require(client.state() == ConnectionState::Connected, "client connects to fake server");
+
+    const SnapshotId ids[] = {1, 3, 2};
+    for (std::size_t index = 0; index < 3; ++index) {
+        const auto packet = make_snapshot_packet(static_cast<std::uint32_t>(20 + index), 123, 0, 0,
+                                                 make_test_snapshot(ids[index]));
+        require(packet.has_value(), "out-of-order Snapshot packet encodes");
+        if (packet.has_value()) {
+            fake_server.send_to(*packet, {"127.0.0.1", client.local_port()});
+        }
+        const auto result = client.update(t0 + std::chrono::milliseconds(2 + static_cast<int>(index)),
+                                          std::chrono::milliseconds(200));
+        log_value("arrival_snapshot_id=" + std::to_string(ids[index]) +
+                  " received_snapshot=" + std::to_string(result.received_snapshot.has_value()) +
+                  " buffer_ids=" + snapshot_ids(client.snapshot_buffer()));
+    }
+
+    require(client.snapshot_buffer().size() == 3, "client buffer keeps all accepted out-of-order snapshots");
+    require(client.snapshot_buffer().snapshots()[0].snapshot_id == 1 &&
+                client.snapshot_buffer().snapshots()[1].snapshot_id == 2 &&
+                client.snapshot_buffer().snapshots()[2].snapshot_id == 3,
+            "client buffer is sorted by snapshot_id after out-of-order arrival");
+}
+
 } // namespace
 
 int main()
@@ -907,6 +1325,23 @@ int main()
              test_integration_client_to_server_reliable_resend_and_cleanup);
     run_test("integration server to client reliable resend and cleanup",
              test_integration_server_to_client_reliable_resend_and_cleanup);
+    run_test("snapshot payload round trip", test_snapshot_payload_round_trip);
+    run_test("snapshot payload decode rejects malformed inputs", test_snapshot_payload_decode_rejects_malformed_inputs);
+    run_test("snapshot encode rejects too many entities", test_snapshot_encode_rejects_too_many_entities);
+    run_test("snapshot buffer insert duplicate and too old", test_snapshot_buffer_insert_duplicate_and_too_old);
+    run_test("snapshot buffer out of order sorting and capacity",
+             test_snapshot_buffer_out_of_order_sorting_and_capacity);
+    run_test("snapshot interpolation positions and missing entity",
+             test_snapshot_interpolation_positions_and_missing_entity);
+    run_test("snapshot rate helpers", test_snapshot_rate_helpers);
+    run_test("snapshot packet type validation and string", test_snapshot_packet_type_validation_and_string);
+    run_test("snapshot send does not enter reliable queue or resend",
+             test_snapshot_send_does_not_enter_reliable_queue_or_resend);
+    run_test("snapshot integration client receives and caches", test_snapshot_integration_client_receives_and_caches);
+    run_test("snapshot integration unconnected and wrong session are dropped",
+             test_snapshot_integration_unconnected_and_wrong_session_are_dropped);
+    run_test("snapshot integration client buffer keeps order after out of order arrival",
+             test_snapshot_integration_client_buffer_keeps_order_after_out_of_order_arrival);
 
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
