@@ -32,7 +32,8 @@ bool is_session_control_packet(PacketType type)
 {
     return type == PacketType::Disconnect ||
            type == PacketType::Heartbeat ||
-           type == PacketType::ReliableData;
+           type == PacketType::ReliableData ||
+           type == PacketType::Snapshot;
 }
 
 PacketValidationResult validate_any_packet(ByteView bytes)
@@ -102,6 +103,11 @@ const std::vector<SentPacketRecord>& ConnectionClient::sent_packets() const
 std::size_t ConnectionClient::reliable_pending_count() const
 {
     return reliable_sender_.pending_count();
+}
+
+const SnapshotBuffer& ConnectionClient::snapshot_buffer() const
+{
+    return snapshot_buffer_;
 }
 
 bool ConnectionClient::send_reliable(const std::vector<std::uint8_t>& payload, std::chrono::steady_clock::time_point now)
@@ -174,6 +180,20 @@ ConnectionClientUpdateResult ConnectionClient::update(std::chrono::steady_clock:
                         state_ = ConnectionState::Disconnected;
                         session_id_ = 0;
                         result.state_changed = true;
+                    } else if (header.type == PacketType::Snapshot) {
+                        validation = validate_snapshot_packet(datagram->bytes);
+                        result.reason = validation.reason;
+                        if (validation.accepted) {
+                            const auto payload_offset = kPacketHeaderSize;
+                            const auto payload_size = datagram->bytes.size() - payload_offset;
+                            const auto decoded =
+                                decode_snapshot_payload(ByteView(datagram->bytes.data() + payload_offset, payload_size));
+                            if (decoded.ok) {
+                                // Snapshot 是不可靠状态同步：合法包只插入本地 buffer，不进入 ReliableSender/Receiver。
+                                snapshot_buffer_.insert(decoded.snapshot);
+                                result.received_snapshot = decoded.snapshot;
+                            }
+                        }
                     } else if (header.type == PacketType::ReliableData) {
                         validation = validate_reliable_data_packet(datagram->bytes);
                         result.reason = validation.reason;
@@ -317,6 +337,35 @@ bool ConnectionServer::send_reliable(std::uint32_t session_id,
     }
 
     return found->reliable_sender.enqueue(payload, now);
+}
+
+bool ConnectionServer::send_snapshot(std::uint32_t session_id,
+                                     const Snapshot& snapshot,
+                                     std::chrono::steady_clock::time_point now)
+{
+    const auto found = std::find_if(sessions_.begin(), sessions_.end(), [&](const ServerSession& session) {
+        return session.session_id == session_id;
+    });
+    if (found == sessions_.end()) {
+        return false;
+    }
+
+    if (snapshot.entities.size() > kMaxEntitiesPerSnapshot) {
+        return false;
+    }
+
+    const auto sequence = found->ack_tracker.allocate_send_sequence();
+    const auto ack_state = found->ack_tracker.make_ack_state();
+    const auto packet = make_snapshot_packet(sequence, found->session_id, ack_state.ack, ack_state.ack_bits, snapshot);
+    if (!packet.has_value()) {
+        return false;
+    }
+
+    // Snapshot 立即发送一次，只记录 packet-level sequence 供 ACK 观察，不加入可靠队列。
+    socket_.send_to(*packet, found->endpoint);
+    found->ack_tracker.record_sent(sequence, now);
+    found->last_send_time = now;
+    return true;
 }
 
 ConnectionServerUpdateResult ConnectionServer::update(std::chrono::steady_clock::time_point now,
