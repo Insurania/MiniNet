@@ -4,6 +4,7 @@
 #include "mininet/packet.hpp"
 #include "mininet/ping.hpp"
 #include "mininet/reliable_message.hpp"
+#include "mininet/scenario.hpp"
 #include "mininet/snapshot.hpp"
 #include "mininet/udp_socket.hpp"
 
@@ -1745,6 +1746,149 @@ void test_network_simulator_protocol_independent_raw_bytes()
     require(packets.size() >= 2 && packets[1].bytes == ping_payload, "MiniNet packet bytes are unchanged and not parsed");
 }
 
+void log_scenario_stats(const ScenarioResult& result)
+{
+    const auto& stats = result.stats;
+    log_value("sent_packets=" + std::to_string(stats.sent_packets) +
+              " delivered_packets=" + std::to_string(stats.delivered_packets) +
+              " dropped_packets=" + std::to_string(stats.dropped_packets) +
+              " duplicate_packets=" + std::to_string(stats.duplicate_packets));
+    log_value("delivered_reliable_messages=" + std::to_string(stats.delivered_reliable_messages) +
+              " pending_reliable_messages=" + std::to_string(stats.pending_reliable_messages) +
+              " retransmission_count=" + std::to_string(stats.retransmission_count));
+    log_value("delivered_snapshots=" + std::to_string(stats.delivered_snapshots) +
+              " duplicate_snapshots=" + std::to_string(stats.duplicate_snapshots) +
+              " snapshot_buffer_size=" + std::to_string(stats.snapshot_buffer_size));
+    log_value("average_latency_ms=" +
+              (stats.average_latency_available ? std::to_string(stats.average_latency_ms) : "not_available"));
+}
+
+ScenarioResult run_scenario(ScenarioConfig config)
+{
+    const ScenarioRunner runner;
+    auto result = runner.run(config);
+    log_scenario_stats(result);
+    return result;
+}
+
+void test_scenario_default_config_runs()
+{
+    const auto result = run_scenario(ScenarioConfig{});
+    require(result.stats.result == "PASS", "default scenario passes");
+    require(result.stats.sent_reliable_messages == 10, "default scenario enqueues reliable messages");
+    require(result.stats.sent_snapshots == 20, "default scenario sends snapshots");
+    require(!result.events.empty(), "default scenario records events");
+}
+
+void test_scenario_loss_zero_drops_zero()
+{
+    ScenarioConfig config;
+    config.loss_rate = 0.0;
+    config.messages = 8;
+    config.snapshots = 8;
+    const auto result = run_scenario(config);
+    require(result.stats.dropped_packets == 0, "loss=0 leaves no dropped packets after drain");
+    require(result.stats.delivered_reliable_messages == result.stats.sent_reliable_messages,
+            "loss=0 delivers all reliable messages to receiver");
+    require(result.stats.pending_reliable_messages == 0, "loss=0 clears reliable pending queue");
+}
+
+void test_scenario_loss_one_delivers_zero()
+{
+    ScenarioConfig config;
+    config.loss_rate = 1.0;
+    config.messages = 4;
+    config.snapshots = 4;
+    config.duration_ms = 300;
+    const auto result = run_scenario(config);
+    require(result.stats.delivered_packets == 0, "loss=1 delivers no packets");
+    require(result.stats.dropped_packets == result.stats.sent_packets, "loss=1 drops every sent packet");
+    require(!result.stats.average_latency_available, "loss=1 has no average latency");
+}
+
+void test_scenario_duplicate_one_records_duplicates()
+{
+    ScenarioConfig config;
+    config.loss_rate = 0.0;
+    config.duplicate_rate = 1.0;
+    config.messages = 4;
+    config.snapshots = 4;
+    const auto result = run_scenario(config);
+    require(result.stats.duplicate_packets > 0, "duplicate=1 records duplicate packets");
+    require(result.stats.delivered_reliable_messages == result.stats.sent_reliable_messages,
+            "duplicate reliable packets are deduplicated at business layer");
+    require(result.stats.delivered_snapshots == result.stats.snapshot_buffer_size,
+            "duplicate snapshots are not inserted twice into buffer");
+}
+
+void test_scenario_fixed_latency_reports_expected_latency()
+{
+    ScenarioConfig config;
+    config.min_latency_ms = 50;
+    config.max_latency_ms = 50;
+    config.messages = 2;
+    config.snapshots = 2;
+    const auto result = run_scenario(config);
+    require(result.stats.average_latency_available, "fixed latency scenario reports average latency");
+    require(std::fabs(result.stats.average_latency_ms - 50.0) < 0.001, "average latency equals fixed latency");
+}
+
+void test_scenario_same_seed_is_deterministic()
+{
+    ScenarioConfig config;
+    config.loss_rate = 0.25;
+    config.duplicate_rate = 0.5;
+    config.min_latency_ms = 10;
+    config.max_latency_ms = 90;
+    config.seed = 123;
+    config.messages = 12;
+    config.snapshots = 12;
+
+    const auto first = run_scenario(config);
+    const auto second = run_scenario(config);
+    require(first.stats.sent_packets == second.stats.sent_packets, "same seed keeps sent packet count stable");
+    require(first.stats.delivered_packets == second.stats.delivered_packets,
+            "same seed keeps delivered packet count stable");
+    require(first.stats.dropped_packets == second.stats.dropped_packets, "same seed keeps dropped packet count stable");
+    require(first.stats.duplicate_packets == second.stats.duplicate_packets,
+            "same seed keeps duplicate packet count stable");
+}
+
+void test_scenario_validation_rejects_invalid_config()
+{
+    ScenarioConfig config;
+    config.loss_rate = -1.0;
+    require(!validate_scenario_config(config).accepted, "negative loss is rejected");
+
+    config = ScenarioConfig{};
+    config.duplicate_rate = 2.0;
+    require(!validate_scenario_config(config).accepted, "duplicate greater than 1 is rejected");
+
+    config = ScenarioConfig{};
+    config.min_latency_ms = 20;
+    config.max_latency_ms = 10;
+    require(!validate_scenario_config(config).accepted, "min latency greater than max latency is rejected");
+}
+
+void test_scenario_exports_summary_and_events()
+{
+    ScenarioConfig config;
+    config.messages = 3;
+    config.snapshots = 3;
+    const auto result = run_scenario(config);
+    const auto json = scenario_summary_to_json(result);
+    const auto csv = scenario_summary_to_csv_header() + scenario_summary_to_csv_row(result);
+    const auto events = scenario_events_to_json(result);
+
+    require(json.find("\"config\"") != std::string::npos, "summary JSON contains config");
+    require(json.find("\"stats\"") != std::string::npos, "summary JSON contains stats");
+    require(json.find("\"failed_reliable_messages\": \"not_available\"") != std::string::npos,
+            "summary JSON marks failed reliable messages not_available");
+    require(csv.find("seed,loss_rate,duplicate_rate") == 0, "CSV contains header");
+    require(events.find("\"events\"") != std::string::npos, "event log JSON contains events array");
+    require(events.find("packet_sent") != std::string::npos, "event log contains packet_sent");
+}
+
 } // namespace
 
 int main()
@@ -1808,6 +1952,14 @@ int main()
     run_test("network simulator deterministic seed", test_network_simulator_deterministic_seed);
     run_test("network simulator protocol independent raw bytes",
              test_network_simulator_protocol_independent_raw_bytes);
+    run_test("scenario default config runs", test_scenario_default_config_runs);
+    run_test("scenario loss zero drops zero", test_scenario_loss_zero_drops_zero);
+    run_test("scenario loss one delivers zero", test_scenario_loss_one_delivers_zero);
+    run_test("scenario duplicate one records duplicates", test_scenario_duplicate_one_records_duplicates);
+    run_test("scenario fixed latency reports expected latency", test_scenario_fixed_latency_reports_expected_latency);
+    run_test("scenario same seed is deterministic", test_scenario_same_seed_is_deterministic);
+    run_test("scenario validation rejects invalid config", test_scenario_validation_rejects_invalid_config);
+    run_test("scenario exports summary and events", test_scenario_exports_summary_and_events);
 
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";

@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MiniNet Simulation Visualizer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", Arial, sans-serif;
+      color: #17202a;
+      background: #f6f8fa;
+    }
+    body {
+      margin: 0;
+    }
+    header {
+      padding: 24px;
+      background: #ffffff;
+      border-bottom: 1px solid #d8dee4;
+    }
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 24px;
+    }
+    h2 {
+      margin: 28px 0 12px;
+      font-size: 18px;
+    }
+    input {
+      display: block;
+      margin-top: 8px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      background: #ffffff;
+      border: 1px solid #d8dee4;
+      border-radius: 8px;
+      padding: 14px;
+    }
+    .label {
+      color: #57606a;
+      font-size: 13px;
+    }
+    .value {
+      margin-top: 6px;
+      font-size: 22px;
+      font-weight: 600;
+      word-break: break-word;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #ffffff;
+      border: 1px solid #d8dee4;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    th, td {
+      padding: 8px 10px;
+      border-bottom: 1px solid #d8dee4;
+      text-align: left;
+      font-size: 13px;
+      vertical-align: top;
+    }
+    th {
+      background: #eef2f6;
+      color: #24292f;
+    }
+    .bar {
+      display: flex;
+      height: 18px;
+      overflow: hidden;
+      border-radius: 6px;
+      border: 1px solid #d8dee4;
+      background: #ffffff;
+    }
+    .bar span:first-child {
+      background: #2da44e;
+    }
+    .bar span:last-child {
+      background: #cf222e;
+    }
+    .muted {
+      color: #57606a;
+    }
+    .error {
+      color: #cf222e;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MiniNet Simulation Visualizer</h1>
+    <label>
+      选择 JSON summary 或 event log
+      <input id="fileInput" type="file" accept=".json,application/json">
+    </label>
+    <p id="status" class="muted">本页面是静态 HTML，可以直接从本地浏览器打开。</p>
+  </header>
+  <main>
+    <section>
+      <h2>Config</h2>
+      <div id="config" class="grid"></div>
+    </section>
+    <section>
+      <h2>Packet Summary</h2>
+      <div id="packet" class="grid"></div>
+      <div id="packetBar" style="margin-top: 12px;"></div>
+    </section>
+    <section>
+      <h2>Reliable Message Summary</h2>
+      <div id="reliable" class="grid"></div>
+    </section>
+    <section>
+      <h2>Snapshot Summary</h2>
+      <div id="snapshot" class="grid"></div>
+    </section>
+    <section>
+      <h2>Events</h2>
+      <div id="events" class="muted">当前 JSON 没有 events 数组。</div>
+    </section>
+  </main>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const status = document.getElementById('status');
+
+    function text(value) {
+      return value === undefined || value === null ? 'not_available' : String(value);
+    }
+
+    function metric(label, value) {
+      return `<div class="metric"><div class="label">${label}</div><div class="value">${text(value)}</div></div>`;
+    }
+
+    function renderMetrics(id, entries) {
+      document.getElementById(id).innerHTML = entries.map(([label, value]) => metric(label, value)).join('');
+    }
+
+    function renderObject(id, object) {
+      const entries = Object.entries(object || {});
+      renderMetrics(id, entries.length ? entries : [['status', 'not_available']]);
+    }
+
+    function renderPacketBar(stats) {
+      const sent = Number(stats.sent_packets || 0);
+      const delivered = Number(stats.delivered_packets || 0);
+      const dropped = Number(stats.dropped_packets || 0);
+      if (!sent) {
+        document.getElementById('packetBar').innerHTML = '<p class="muted">No packet data.</p>';
+        return;
+      }
+      const deliveredPct = Math.max(0, Math.min(100, delivered / sent * 100));
+      const droppedPct = Math.max(0, Math.min(100, dropped / sent * 100));
+      document.getElementById('packetBar').innerHTML =
+        `<div class="bar"><span style="width:${deliveredPct}%"></span><span style="width:${droppedPct}%"></span></div>` +
+        `<p class="muted">Delivered ${deliveredPct.toFixed(1)}%, dropped ${droppedPct.toFixed(1)}%</p>`;
+    }
+
+    function renderEvents(events) {
+      const target = document.getElementById('events');
+      if (!Array.isArray(events) || events.length === 0) {
+        target.className = 'muted';
+        target.textContent = '当前 JSON 没有 events 数组。';
+        return;
+      }
+      const rows = events.slice(0, 500).map(event => `
+        <tr>
+          <td>${text(event.time_ms)}</td>
+          <td>${text(event.event_type)}</td>
+          <td>${text(event.source)}</td>
+          <td>${text(event.target)}</td>
+          <td>${text(event.packet_sequence)}</td>
+          <td>${text(event.message_id)}</td>
+          <td>${text(event.snapshot_id)}</td>
+          <td>${text(event.latency_ms)}</td>
+          <td>${text(event.details)}</td>
+        </tr>`).join('');
+      target.className = '';
+      target.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>time_ms</th><th>event_type</th><th>source</th><th>target</th>
+              <th>packet_sequence</th><th>message_id</th><th>snapshot_id</th><th>latency_ms</th><th>details</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+        ${events.length > 500 ? '<p class="muted">只显示前 500 条 events。</p>' : ''}`;
+    }
+
+    function render(data) {
+      const stats = data.stats || {};
+      renderObject('config', data.config || {});
+      renderMetrics('packet', [
+        ['sent_packets', stats.sent_packets],
+        ['delivered_packets', stats.delivered_packets],
+        ['dropped_packets', stats.dropped_packets],
+        ['duplicate_packets', stats.duplicate_packets],
+        ['average_latency_ms', stats.average_latency_ms],
+        ['result', stats.result]
+      ]);
+      renderPacketBar(stats);
+      renderMetrics('reliable', [
+        ['sent_reliable_messages', stats.sent_reliable_messages],
+        ['delivered_reliable_messages', stats.delivered_reliable_messages],
+        ['pending_reliable_messages', stats.pending_reliable_messages],
+        ['retransmission_count', stats.retransmission_count],
+        ['failed_reliable_messages', stats.failed_reliable_messages]
+      ]);
+      renderMetrics('snapshot', [
+        ['sent_snapshots', stats.sent_snapshots],
+        ['delivered_snapshots', stats.delivered_snapshots],
+        ['duplicate_snapshots', stats.duplicate_snapshots],
+        ['snapshot_buffer_size', stats.snapshot_buffer_size],
+        ['dropped_or_missing_snapshots', stats.dropped_or_missing_snapshots],
+        ['out_of_order_snapshots', stats.out_of_order_snapshots]
+      ]);
+      renderEvents(data.events);
+    }
+
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) {
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = JSON.parse(reader.result);
+          render(data);
+          status.className = 'muted';
+          status.textContent = `已加载 ${file.name}`;
+        } catch (error) {
+          status.className = 'error';
+          status.textContent = `JSON 解析失败: ${error.message}`;
+        }
+      };
+      reader.readAsText(file);
+    });
+  </script>
+</body>
+</html>
