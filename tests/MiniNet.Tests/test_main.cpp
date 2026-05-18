@@ -1,5 +1,6 @@
 #include "mininet/ack_tracker.hpp"
 #include "mininet/connection.hpp"
+#include "mininet/network_simulator.hpp"
 #include "mininet/packet.hpp"
 #include "mininet/ping.hpp"
 #include "mininet/reliable_message.hpp"
@@ -62,6 +63,64 @@ std::string byte_list(const std::vector<std::uint8_t>& values)
             text += ",";
         }
         text += std::to_string(values[index]);
+    }
+    return text;
+}
+
+std::string byte_list(std::initializer_list<std::uint8_t> values)
+{
+    return byte_list(std::vector<std::uint8_t>{values});
+}
+
+std::int64_t delay_ms(Clock::time_point start, Clock::time_point delivery_time)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(delivery_time - start).count();
+}
+
+UdpEndpoint endpoint(const std::string& address, std::uint16_t port)
+{
+    return UdpEndpoint{address, port};
+}
+
+const char* to_string(NetworkSimulatorConfigRejectReason reason)
+{
+    switch (reason) {
+    case NetworkSimulatorConfigRejectReason::None:
+        return "None";
+    case NetworkSimulatorConfigRejectReason::InvalidLossRate:
+        return "InvalidLossRate";
+    case NetworkSimulatorConfigRejectReason::InvalidDuplicateRate:
+        return "InvalidDuplicateRate";
+    case NetworkSimulatorConfigRejectReason::InvalidLatencyRange:
+        return "InvalidLatencyRange";
+    }
+
+    return "Unknown";
+}
+
+NetworkSimulatorConfig network_simulator_config(double loss_rate,
+                                                double duplicate_rate,
+                                                std::chrono::milliseconds min_latency,
+                                                std::chrono::milliseconds max_latency,
+                                                std::uint32_t random_seed = 1)
+{
+    NetworkSimulatorConfig config;
+    config.loss_rate = loss_rate;
+    config.duplicate_rate = duplicate_rate;
+    config.min_latency = min_latency;
+    config.max_latency = max_latency;
+    config.random_seed = random_seed;
+    return config;
+}
+
+std::string packet_order(const std::vector<QueuedPacket>& packets)
+{
+    std::string text;
+    for (std::size_t index = 0; index < packets.size(); ++index) {
+        if (index != 0) {
+            text += ",";
+        }
+        text += byte_list(packets[index].bytes);
     }
     return text;
 }
@@ -1291,6 +1350,401 @@ void test_snapshot_integration_client_buffer_keeps_order_after_out_of_order_arri
             "client buffer is sorted by snapshot_id after out-of-order arrival");
 }
 
+void test_network_simulator_config_validation()
+{
+    const auto valid_min = network_simulator_config(0.0, 0.0, std::chrono::milliseconds(0),
+                                                   std::chrono::milliseconds(0));
+    const auto valid_max = network_simulator_config(1.0, 1.0, std::chrono::milliseconds(100),
+                                                   std::chrono::milliseconds(100));
+    const auto valid_min_result = validate_network_simulator_config(valid_min);
+    const auto valid_max_result = validate_network_simulator_config(valid_max);
+    log_value("loss_rate=0 duplicate_rate=0 accepted=" + std::to_string(valid_min_result.accepted));
+    log_value("loss_rate=1 duplicate_rate=1 accepted=" + std::to_string(valid_max_result.accepted));
+    require(valid_min_result.accepted && valid_min_result.reason == NetworkSimulatorConfigRejectReason::None,
+            "boundary 0 rates are accepted");
+    require(valid_max_result.accepted && valid_max_result.reason == NetworkSimulatorConfigRejectReason::None,
+            "boundary 1 rates are accepted");
+
+    const struct {
+        NetworkSimulatorConfig config;
+        NetworkSimulatorConfigRejectReason reason;
+        const char* name;
+    } cases[] = {
+        {network_simulator_config(-0.01, 0.0, std::chrono::milliseconds(0), std::chrono::milliseconds(0)),
+         NetworkSimulatorConfigRejectReason::InvalidLossRate, "loss_rate_negative"},
+        {network_simulator_config(1.01, 0.0, std::chrono::milliseconds(0), std::chrono::milliseconds(0)),
+         NetworkSimulatorConfigRejectReason::InvalidLossRate, "loss_rate_too_high"},
+        {network_simulator_config(0.0, -0.01, std::chrono::milliseconds(0), std::chrono::milliseconds(0)),
+         NetworkSimulatorConfigRejectReason::InvalidDuplicateRate, "duplicate_rate_negative"},
+        {network_simulator_config(0.0, 1.01, std::chrono::milliseconds(0), std::chrono::milliseconds(0)),
+         NetworkSimulatorConfigRejectReason::InvalidDuplicateRate, "duplicate_rate_too_high"},
+        {network_simulator_config(0.0, 0.0, std::chrono::milliseconds(101), std::chrono::milliseconds(100)),
+         NetworkSimulatorConfigRejectReason::InvalidLatencyRange, "latency_range_inverted"},
+    };
+
+    for (const auto& test_case : cases) {
+        const auto validation = validate_network_simulator_config(test_case.config);
+        const auto simulator = NetworkSimulator::create(test_case.config);
+        log_value(std::string("case=") + test_case.name +
+                  " loss_rate=" + std::to_string(test_case.config.loss_rate) +
+                  " duplicate_rate=" + std::to_string(test_case.config.duplicate_rate) +
+                  " latency_min_ms=" + std::to_string(test_case.config.min_latency.count()) +
+                  " latency_max_ms=" + std::to_string(test_case.config.max_latency.count()) +
+                  " accepted=" + std::to_string(validation.accepted) +
+                  " reason=" + to_string(validation.reason) +
+                  " create_has_value=" + std::to_string(simulator.has_value()));
+        require(!validation.accepted, std::string(test_case.name) + " is rejected");
+        require(validation.reason == test_case.reason, std::string(test_case.name) + " reports expected reason");
+        require(!simulator.has_value(), std::string(test_case.name) + " create returns nullopt");
+    }
+}
+
+void test_network_simulator_no_loss_delivery()
+{
+    const auto config = network_simulator_config(0.0, 0.0, std::chrono::milliseconds(0),
+                                                std::chrono::milliseconds(0), 11);
+    auto simulator = NetworkSimulator::create(config);
+    require(simulator.has_value(), "valid simulator config creates simulator");
+    if (!simulator.has_value()) {
+        return;
+    }
+
+    const auto t0 = Clock::time_point{};
+    const auto sender = endpoint("10.0.0.1", 1000);
+    const auto receiver = endpoint("10.0.0.2", 2000);
+    const auto payload = bytes({0x10, 0x20, 0x30});
+
+    simulator->send(sender, receiver, payload, t0);
+    const auto packets = simulator->poll(receiver, t0);
+
+    log_value("loss_rate=" + std::to_string(config.loss_rate) +
+              " latency_ms=" + std::to_string(config.min_latency.count()) +
+              " in_flight_count=" + std::to_string(simulator->in_flight_count()) +
+              " bytes=" + (packets.empty() ? std::string("") : byte_list(packets.front().bytes)));
+    require(packets.size() == 1, "receiver polls one packet at zero latency");
+    require(!packets.empty() && packets.front().bytes == payload, "raw bytes are delivered unchanged");
+    require(!packets.empty() && packets.front().from.address == sender.address && packets.front().from.port == sender.port,
+            "sender endpoint is preserved");
+    require(!packets.empty() && packets.front().delivery_time == t0, "zero latency delivery_time equals now");
+}
+
+void test_network_simulator_full_loss()
+{
+    const auto config = network_simulator_config(1.0, 1.0, std::chrono::milliseconds(0),
+                                                std::chrono::milliseconds(0), 12);
+    auto simulator = NetworkSimulator::create(config);
+    require(simulator.has_value(), "valid simulator config creates simulator");
+    if (!simulator.has_value()) {
+        return;
+    }
+
+    const auto t0 = Clock::time_point{};
+    const auto sender = endpoint("10.0.0.1", 1000);
+    const auto receiver = endpoint("10.0.0.2", 2000);
+    simulator->send(sender, receiver, bytes({0x01}), t0);
+    const auto in_flight = simulator->in_flight_count();
+    const auto packets = simulator->poll(receiver, t0);
+
+    log_value("loss_rate=" + std::to_string(config.loss_rate) +
+              " duplicate_rate=" + std::to_string(config.duplicate_rate) +
+              " in_flight_count=" + std::to_string(in_flight) +
+              " polled_count=" + std::to_string(packets.size()));
+    require(in_flight == 0, "fully lost packet is not queued");
+    require(packets.empty(), "fully lost packet is not delivered");
+}
+
+void test_network_simulator_fixed_latency()
+{
+    const auto config = network_simulator_config(0.0, 0.0, std::chrono::milliseconds(100),
+                                                std::chrono::milliseconds(100), 13);
+    auto simulator = NetworkSimulator::create(config);
+    require(simulator.has_value(), "valid simulator config creates simulator");
+    if (!simulator.has_value()) {
+        return;
+    }
+
+    const auto t0 = Clock::time_point{};
+    const auto sender = endpoint("10.0.0.1", 1000);
+    const auto receiver = endpoint("10.0.0.2", 2000);
+    simulator->send(sender, receiver, bytes({0x64}), t0);
+
+    const auto early = simulator->poll(receiver, t0 + std::chrono::milliseconds(99));
+    const auto on_time = simulator->poll(receiver, t0 + std::chrono::milliseconds(100));
+
+    log_value("latency_ms=100 early_count=" + std::to_string(early.size()) +
+              " on_time_count=" + std::to_string(on_time.size()) +
+              " in_flight_count=" + std::to_string(simulator->in_flight_count()));
+    log_value("delivery_delay_ms=" +
+              std::to_string(on_time.empty() ? -1 : delay_ms(t0, on_time.front().delivery_time)));
+    require(early.empty(), "packet is not delivered before fixed latency");
+    require(on_time.size() == 1, "packet is delivered at fixed latency");
+    require(!on_time.empty() && on_time.front().delivery_time == t0 + std::chrono::milliseconds(100),
+            "delivery_time equals t0 plus fixed latency");
+}
+
+void test_network_simulator_jitter_latency_range()
+{
+    const auto config = network_simulator_config(0.0, 0.0, std::chrono::milliseconds(50),
+                                                std::chrono::milliseconds(150), 14);
+    auto simulator = NetworkSimulator::create(config);
+    require(simulator.has_value(), "valid simulator config creates simulator");
+    if (!simulator.has_value()) {
+        return;
+    }
+
+    const auto t0 = Clock::time_point{};
+    const auto sender = endpoint("10.0.0.1", 1000);
+    const auto receiver = endpoint("10.0.0.2", 2000);
+    for (std::uint8_t value = 1; value <= 8; ++value) {
+        simulator->send(sender, receiver, bytes({value}), t0);
+    }
+
+    const auto packets = simulator->poll(receiver, t0 + std::chrono::milliseconds(1000));
+    std::string delays;
+    for (std::size_t index = 0; index < packets.size(); ++index) {
+        if (index != 0) {
+            delays += ",";
+        }
+        const auto delay = delay_ms(t0, packets[index].delivery_time);
+        delays += std::to_string(delay);
+        require(delay >= 50 && delay <= 150, "jitter delivery_time is inside configured range");
+    }
+
+    log_value("latency_min_ms=50 latency_max_ms=150 packet_count=" + std::to_string(packets.size()) +
+              " delays_ms=" + delays +
+              " delivery_order=" + packet_order(packets));
+    require(packets.size() == 8, "all jitter packets are eventually delivered");
+}
+
+void test_network_simulator_reordering_and_poll_sorting()
+{
+    const auto t0 = Clock::time_point{};
+    const auto sender = endpoint("10.0.0.1", 1000);
+    const auto receiver = endpoint("10.0.0.2", 2000);
+    std::vector<QueuedPacket> packets;
+    std::uint32_t chosen_seed = 0;
+
+    for (std::uint32_t seed = 1; seed <= 200 && chosen_seed == 0; ++seed) {
+        const auto config = network_simulator_config(0.0, 0.0, std::chrono::milliseconds(0),
+                                                    std::chrono::milliseconds(200), seed);
+        auto simulator = NetworkSimulator::create(config);
+        require(simulator.has_value(), "valid simulator config creates simulator");
+        if (!simulator.has_value()) {
+            return;
+        }
+
+        for (std::uint8_t value = 1; value <= 8; ++value) {
+            simulator->send(sender, receiver, bytes({value}), t0);
+        }
+        auto candidate = simulator->poll(receiver, t0 + std::chrono::milliseconds(1000));
+        bool has_different_delivery_times = false;
+        for (std::size_t index = 1; index < candidate.size(); ++index) {
+            if (candidate[index - 1].delivery_time != candidate[index].delivery_time) {
+                has_different_delivery_times = true;
+            }
+        }
+        if (candidate.size() == 8 && has_different_delivery_times && packet_order(candidate) != "1,2,3,4,5,6,7,8") {
+            chosen_seed = seed;
+            packets = std::move(candidate);
+        }
+    }
+
+    std::string delays;
+    bool sorted = true;
+    for (std::size_t index = 0; index < packets.size(); ++index) {
+        if (index != 0) {
+            delays += ",";
+            if (packets[index - 1].delivery_time > packets[index].delivery_time) {
+                sorted = false;
+            }
+        }
+        delays += std::to_string(delay_ms(t0, packets[index].delivery_time));
+    }
+
+    log_value("chosen_seed=" + std::to_string(chosen_seed) +
+              " delays_ms=" + delays +
+              " delivery_order=" + packet_order(packets));
+    require(chosen_seed != 0, "test found deterministic seed that produces reordering");
+    require(sorted, "poll returns packets sorted by delivery_time");
+
+    const auto fixed_config = network_simulator_config(0.0, 0.0, std::chrono::milliseconds(0),
+                                                       std::chrono::milliseconds(0), 21);
+    auto fixed_simulator = NetworkSimulator::create(fixed_config);
+    require(fixed_simulator.has_value(), "valid fixed latency simulator creates simulator");
+    if (!fixed_simulator.has_value()) {
+        return;
+    }
+
+    fixed_simulator->send(sender, receiver, bytes({1}), t0);
+    fixed_simulator->send(sender, receiver, bytes({2}), t0);
+    fixed_simulator->send(sender, receiver, bytes({3}), t0);
+    const auto same_time_packets = fixed_simulator->poll(receiver, t0);
+    log_value("same_delivery_time_order=" + packet_order(same_time_packets));
+    require(packet_order(same_time_packets) == "1,2,3", "same delivery_time preserves enqueue order");
+}
+
+void test_network_simulator_duplicate_delivery()
+{
+    const auto config = network_simulator_config(0.0, 1.0, std::chrono::milliseconds(0),
+                                                std::chrono::milliseconds(50), 31);
+    auto simulator = NetworkSimulator::create(config);
+    require(simulator.has_value(), "valid simulator config creates simulator");
+    if (!simulator.has_value()) {
+        return;
+    }
+
+    const auto t0 = Clock::time_point{};
+    const auto sender = endpoint("10.0.0.1", 1000);
+    const auto receiver = endpoint("10.0.0.2", 2000);
+    const auto payload = bytes({0x44, 0x55});
+    simulator->send(sender, receiver, payload, t0);
+    const auto packets = simulator->poll(receiver, t0 + std::chrono::milliseconds(1000));
+
+    log_value("loss_rate=" + std::to_string(config.loss_rate) +
+              " duplicate_rate=" + std::to_string(config.duplicate_rate) +
+              " packet_count=" + std::to_string(packets.size()) +
+              " delivery_order=" + packet_order(packets));
+    if (packets.size() == 2) {
+        log_value("delivery_delay_ms=" + std::to_string(delay_ms(t0, packets[0].delivery_time)) +
+                  "," + std::to_string(delay_ms(t0, packets[1].delivery_time)));
+    }
+    require(packets.size() == 2, "duplicate_rate=1 produces original plus one duplicate");
+    for (const auto& packet : packets) {
+        require(packet.from.address == sender.address && packet.from.port == sender.port, "duplicate from endpoint matches");
+        require(packet.to.address == receiver.address && packet.to.port == receiver.port, "duplicate to endpoint matches");
+        require(packet.bytes == payload, "duplicate bytes match original payload");
+    }
+
+    const auto loss_config = network_simulator_config(1.0, 1.0, std::chrono::milliseconds(0),
+                                                     std::chrono::milliseconds(50), 31);
+    auto loss_simulator = NetworkSimulator::create(loss_config);
+    require(loss_simulator.has_value(), "valid full loss simulator creates simulator");
+    if (!loss_simulator.has_value()) {
+        return;
+    }
+
+    loss_simulator->send(sender, receiver, payload, t0);
+    const auto loss_packets = loss_simulator->poll(receiver, t0 + std::chrono::milliseconds(1000));
+    log_value("loss_rate=1 duplicate_rate=1 in_flight_count=" +
+              std::to_string(loss_simulator->in_flight_count()) +
+              " packet_count=" + std::to_string(loss_packets.size()));
+    require(loss_packets.empty(), "lost packet does not produce duplicate");
+}
+
+void test_network_simulator_poll_consume_and_endpoint_filtering()
+{
+    const auto config = network_simulator_config(0.0, 0.0, std::chrono::milliseconds(0),
+                                                std::chrono::milliseconds(0), 41);
+    auto simulator = NetworkSimulator::create(config);
+    require(simulator.has_value(), "valid simulator config creates simulator");
+    if (!simulator.has_value()) {
+        return;
+    }
+
+    const auto t0 = Clock::time_point{};
+    const auto sender = endpoint("10.0.0.1", 1000);
+    const auto receiver_b = endpoint("10.0.0.2", 2000);
+    const auto receiver_c = endpoint("10.0.0.2", 2001);
+    const auto receiver_same_port_other_address = endpoint("10.0.0.3", 2000);
+
+    simulator->send(sender, receiver_b, bytes({0x0B}), t0);
+    simulator->send(sender, receiver_c, bytes({0x0C}), t0);
+    simulator->send(sender, receiver_same_port_other_address, bytes({0x0D}), t0);
+
+    const auto b_first = simulator->poll(receiver_b, t0);
+    const auto b_second = simulator->poll(receiver_b, t0);
+    const auto c_packets = simulator->poll(receiver_c, t0);
+    const auto other_address_packets = simulator->poll(receiver_same_port_other_address, t0);
+
+    log_value("b_first_count=" + std::to_string(b_first.size()) +
+              " b_second_count=" + std::to_string(b_second.size()) +
+              " c_count=" + std::to_string(c_packets.size()) +
+              " other_address_count=" + std::to_string(other_address_packets.size()) +
+              " in_flight_count=" + std::to_string(simulator->in_flight_count()));
+    log_value("b_bytes=" + packet_order(b_first) +
+              " c_bytes=" + packet_order(c_packets) +
+              " other_address_bytes=" + packet_order(other_address_packets));
+    require(packet_order(b_first) == "11", "B receives only packet addressed to B");
+    require(b_second.empty(), "poll consumes delivered packets for the receiver");
+    require(packet_order(c_packets) == "12", "packet for different port remains available for C");
+    require(packet_order(other_address_packets) == "13", "packet for different address remains available");
+}
+
+void test_network_simulator_deterministic_seed()
+{
+    const auto config = network_simulator_config(0.25, 0.5, std::chrono::milliseconds(10),
+                                                std::chrono::milliseconds(90), 51);
+    auto first = NetworkSimulator::create(config);
+    auto second = NetworkSimulator::create(config);
+    require(first.has_value() && second.has_value(), "same valid config creates both simulators");
+    if (!first.has_value() || !second.has_value()) {
+        return;
+    }
+
+    const auto t0 = Clock::time_point{};
+    const auto sender = endpoint("10.0.0.1", 1000);
+    const auto receiver = endpoint("10.0.0.2", 2000);
+    for (std::uint8_t value = 1; value <= 10; ++value) {
+        const auto payload = bytes({value, static_cast<std::uint8_t>(value + 10)});
+        first->send(sender, receiver, payload, t0 + std::chrono::milliseconds(value));
+        second->send(sender, receiver, payload, t0 + std::chrono::milliseconds(value));
+    }
+
+    const auto first_packets = first->poll(receiver, t0 + std::chrono::milliseconds(1000));
+    const auto second_packets = second->poll(receiver, t0 + std::chrono::milliseconds(1000));
+    bool same = first_packets.size() == second_packets.size();
+    for (std::size_t index = 0; same && index < first_packets.size(); ++index) {
+        same = first_packets[index].bytes == second_packets[index].bytes &&
+               first_packets[index].delivery_time == second_packets[index].delivery_time &&
+               first_packets[index].from.address == second_packets[index].from.address &&
+               first_packets[index].from.port == second_packets[index].from.port &&
+               first_packets[index].to.address == second_packets[index].to.address &&
+               first_packets[index].to.port == second_packets[index].to.port;
+    }
+
+    std::string delays;
+    for (std::size_t index = 0; index < first_packets.size(); ++index) {
+        if (index != 0) {
+            delays += ",";
+        }
+        delays += std::to_string(delay_ms(t0, first_packets[index].delivery_time));
+    }
+    log_value("random_seed=" + std::to_string(config.random_seed) +
+              " first_count=" + std::to_string(first_packets.size()) +
+              " second_count=" + std::to_string(second_packets.size()) +
+              " delivery_order=" + packet_order(first_packets) +
+              " delivery_times_ms=" + delays);
+    require(same, "same seed and input sequence produce identical poll results");
+}
+
+void test_network_simulator_protocol_independent_raw_bytes()
+{
+    const auto config = network_simulator_config(0.0, 0.0, std::chrono::milliseconds(0),
+                                                std::chrono::milliseconds(0), 61);
+    auto simulator = NetworkSimulator::create(config);
+    require(simulator.has_value(), "valid simulator config creates simulator");
+    if (!simulator.has_value()) {
+        return;
+    }
+
+    const auto t0 = Clock::time_point{};
+    const auto sender = endpoint("10.0.0.1", 1000);
+    const auto receiver = endpoint("10.0.0.2", 2000);
+    const auto raw_payload = bytes({0xFF, 0x00, 0x13});
+    const auto ping_payload = make_ping_packet(77);
+
+    simulator->send(sender, receiver, raw_payload, t0);
+    simulator->send(sender, receiver, ping_payload, t0);
+    const auto packets = simulator->poll(receiver, t0);
+
+    log_value("raw_bytes=" + byte_list(raw_payload) +
+              " ping_bytes_size=" + std::to_string(ping_payload.size()) +
+              " delivery_order=" + packet_order(packets));
+    require(packets.size() == 2, "raw and MiniNet-looking packets are both delivered");
+    require(packets.size() >= 1 && packets[0].bytes == raw_payload, "non-MiniNet header bytes are unchanged");
+    require(packets.size() >= 2 && packets[1].bytes == ping_payload, "MiniNet packet bytes are unchanged and not parsed");
+}
+
 } // namespace
 
 int main()
@@ -1342,6 +1796,18 @@ int main()
              test_snapshot_integration_unconnected_and_wrong_session_are_dropped);
     run_test("snapshot integration client buffer keeps order after out of order arrival",
              test_snapshot_integration_client_buffer_keeps_order_after_out_of_order_arrival);
+    run_test("network simulator config validation", test_network_simulator_config_validation);
+    run_test("network simulator no loss delivery", test_network_simulator_no_loss_delivery);
+    run_test("network simulator full loss", test_network_simulator_full_loss);
+    run_test("network simulator fixed latency", test_network_simulator_fixed_latency);
+    run_test("network simulator jitter latency range", test_network_simulator_jitter_latency_range);
+    run_test("network simulator reordering and poll sorting", test_network_simulator_reordering_and_poll_sorting);
+    run_test("network simulator duplicate delivery", test_network_simulator_duplicate_delivery);
+    run_test("network simulator poll consume and endpoint filtering",
+             test_network_simulator_poll_consume_and_endpoint_filtering);
+    run_test("network simulator deterministic seed", test_network_simulator_deterministic_seed);
+    run_test("network simulator protocol independent raw bytes",
+             test_network_simulator_protocol_independent_raw_bytes);
 
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
