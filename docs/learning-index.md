@@ -110,3 +110,30 @@
 - 从 `SnapshotBuffer` 和目标 `server_time_ms` 自动寻找插值区间。
 - 加入延迟、丢包、乱序模拟后观察 buffer 行为。
 - 后续单独设计 extrapolation、client prediction 或 reconciliation。
+
+## Network Simulator
+
+相关 issue：#12
+相关 PR：
+架构方案：`docs/architecture-plans/issue-12-network-simulator.md`
+关键代码：`src/MiniNet/include/mininet/network_simulator.hpp`、`src/MiniNet/src/network_simulator.cpp`
+关键测试：`tests/MiniNet.Tests/test_main.cpp`
+
+核心概念：
+
+- localhost 太稳定，网络模拟器能把丢包、延迟、乱序、重复包变成可复现测试。
+- Network Simulator 只处理 raw bytes，不解析 `PacketHeader`、ReliableMessage 或 Snapshot。
+- deterministic seed 的目标是同一实现和同一输入序列可复现，不追求跨编译器完全一致。
+- `poll` 的排序规则很重要：先按 `delivery_time`，相同时间按入队顺序。
+
+实现时踩到的点：
+
+- 配置错误应 reject，不应静默 clamp，否则测试参数写错会被掩盖。
+- duplicate packet 保留相同 bytes/from/to，但 latency 应独立抽样。
+- 不要为了 simulator 修改现有 `ConnectionClient` / `ConnectionServer`，否则会把测试工具变成 transport 重构。
+
+后续可以扩展：
+
+- 用 Network Simulator 重写 reliable resend 的丢包测试。
+- 用 Network Simulator 测 Snapshot 乱序、丢失和重复包下的 buffer 行为。
+- 后续单独设计 transport interface，让真实 socket 和 simulator 可以共享更高层协议状态机。
