@@ -13,6 +13,7 @@ add_library(MiniNet
     src/MiniNet/src/ping.cpp
     src/MiniNet/src/network_simulator.cpp
     src/MiniNet/src/reliable_message.cpp
+    src/MiniNet/src/scenario.cpp
     src/MiniNet/src/snapshot.cpp
     src/MiniNet/src/udp_socket.cpp
 )
@@ -36,6 +37,11 @@ add_executable(MiniNet.Client
     src/MiniNet.Client/main.cpp
 )
 target_link_libraries(MiniNet.Client PRIVATE MiniNet)
+
+add_executable(MiniNet.Sim
+    src/MiniNet.Sim/main.cpp
+)
+target_link_libraries(MiniNet.Sim PRIVATE MiniNet)
 
 enable_testing()
 

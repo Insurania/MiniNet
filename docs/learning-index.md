@@ -138,6 +138,33 @@
 - 用 Network Simulator 测 Snapshot 乱序、丢失和重复包下的 buffer 行为。
 - 后续单独设计 transport interface，让真实 socket 和 simulator 可以共享更高层协议状态机。
 
+## Network Simulation Scenario Runner
+
+相关 issue：#16
+相关 PR：
+架构方案：`docs/architecture-plans/issue-16-network-simulation-scenario-runner.md`
+关键代码：`src/MiniNet/include/mininet/scenario.hpp`、`src/MiniNet/src/scenario.cpp`、`src/MiniNet.Sim/main.cpp`
+关键文档：`docs/simulation.md`、`docs/visualizer/index.html`
+关键测试：`tests/MiniNet.Tests/test_main.cpp`
+
+核心概念：
+
+- Scenario runner 是组合层，用现有 `NetworkSimulator`、packet 编解码、reliable message 和 snapshot buffer 观察整体行为。
+- 它不新增 transport interface，也不把 simulator 注入 `ConnectionClient` / `ConnectionServer`。
+- JSON / CSV / event log 都是固定字段手写导出，避免为学习工具引入第三方依赖。
+- Visualizer 是静态 HTML，通过文件选择器读取导出的 JSON。
+
+实现时踩到的点：
+
+- `failed_reliable_messages`、`dropped_or_missing_snapshots`、`out_of_order_snapshots` 第一版保持 `not_available`。
+- 当前 Windows MinGW 工具链的 `<filesystem>` 不稳定，文件写入使用保守的字符串路径和逐级目录创建。
+
+后续可以扩展：
+
+- 更细的 snapshot missing / out-of-order 统计。
+- 批量 seed 实验和趋势对比。
+- 更完整的 event timeline 可视化。
+
 ## Protocol and Architecture Documentation
 
 相关 issue：#14
