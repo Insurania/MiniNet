@@ -137,3 +137,25 @@
 - 用 Network Simulator 重写 reliable resend 的丢包测试。
 - 用 Network Simulator 测 Snapshot 乱序、丢失和重复包下的 buffer 行为。
 - 后续单独设计 transport interface，让真实 socket 和 simulator 可以共享更高层协议状态机。
+
+## Protocol and Architecture Documentation
+
+相关 issue：#14
+相关 PR：
+架构方案：不单独保存；本 issue 本身就是文档产出。
+关键文档：`docs/protocol.md`、`docs/architecture.md`
+关键代码：`src/MiniNet/include/mininet/*.hpp`
+
+核心概念：
+
+- `docs/protocol.md` 解释 packet header、packet type、ACK bits、ReliableData、Snapshot 和 NetworkSimulator 的协议语义。
+- `docs/architecture.md` 解释 packet、connection、ack_tracker、reliable_message、snapshot、network_simulator、udp_socket 的模块职责。
+- 文档要记录当前真实实现，不能提前声称 ordered delivery、fragmentation、congestion control 等尚未实现能力。
+
+实现时踩到的点：
+
+- issue 草稿中提到 ReliableData 有 `message_type`，但当前代码没有这个字段；文档按真实代码写为 `message_count + message_id + payload_size + payload bytes`。
+
+后续可以扩展：
+
+- 后续新增 reliable ordered、RTT/RTO、scenario runner 时，先同步更新协议和架构文档。
