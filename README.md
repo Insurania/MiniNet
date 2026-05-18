@@ -25,10 +25,10 @@ MiniNet 是一个学习型项目，目标是在实现一个简化版游戏网络
 - 心跳与超时：已完成
 - 包序号：已完成
 - ACK 与 ACK bits：已完成
-- 可靠消息
-- 丢包重传
-- 不可靠状态同步
-- 延迟、丢包、乱序、重复包模拟
+- 可靠消息：已完成
+- 丢包重传：已完成
+- 不可靠状态同步：已完成
+- 延迟、丢包、乱序、重复包模拟：已完成
 
 ## 目录结构
 
@@ -41,6 +41,10 @@ MiniNet/
     pull_request_template.md
   CMakeLists.txt
   docs/
+    agent-workflow.md
+    architecture-plans/
+    learning-index.md
+    post-merge-checklist.md
     project-rules.md
     roadmap.md
   src/
@@ -70,16 +74,25 @@ MiniNet/
 - `ack` 和 `ack_bits` 生成
 - Sent packet acked/unacked 状态追踪
 - `uint32_t` sequence wrap-around comparison
+- Reliable unordered message
+- Packet-level ACK 驱动的可靠消息 delivery cleanup
+- Reliable message resend
+- Reliable receiver duplicate suppression
+- Unreliable snapshot sync
+- Snapshot payload 显式 encode/decode
+- Snapshot buffer、乱序插入、重复/过旧丢弃和插值 helper
+- Deterministic in-memory network simulator
+- 延迟、抖动、丢包、重复包和乱序投递模拟
 
 当前仍未实现：
 
-- Reliable message
-- Retransmission
 - Ordered delivery
 - Congestion control
 - RTT 平滑估计
-- 不可靠状态同步
-- 网络延迟、丢包、乱序模拟
+- Reliable ordered delivery
+- Fragmentation / 大包传输
+- Client prediction / rollback / reconciliation
+- 真实 transport abstraction，把 simulator 注入现有 connection 层
 
 ## 核心模块
 
@@ -88,6 +101,9 @@ MiniNet/
 - `ping`：实现最小 Ping/Pong 示例。
 - `connection`：实现 UDP 之上的 virtual connection、heartbeat、timeout 和 disconnect。
 - `ack_tracker`：实现 sequence 分配、received history、sent history、ACK 和 ACK bits。
+- `reliable_message`：实现可靠无序消息、packet ACK delivery cleanup 和重传选择。
+- `snapshot`：实现不可靠状态同步的 snapshot 编解码、buffer 和插值 helper。
+- `network_simulator`：实现测试用 deterministic in-memory 网络模拟器。
 
 ## 推荐协作流程
 
@@ -139,4 +155,6 @@ ctest --test-dir build --output-on-failure
 - 已实现 issue #1：UDP Ping/Pong、typed packet header、基础包校验和本地测试。
 - 已实现 issue #3：UDP virtual connection、session、heartbeat、timeout 和 disconnect。
 - 已实现 issue #6：packet sequence、ACK 和 ACK bits。
-- 尚未实现重传、可靠消息、不可靠状态同步和网络模拟器。
+- 已实现 issue #8：Reliable unordered messages、ACK 后清理、丢包重传和去重。
+- 已实现 issue #10：Unreliable snapshot synchronization、SnapshotBuffer 和插值 helper。
+- 已实现 issue #12：Deterministic network simulator，支持延迟、抖动、丢包、重复包和乱序。
